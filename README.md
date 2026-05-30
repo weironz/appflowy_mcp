@@ -10,7 +10,13 @@ An MCP server for AppFlowy. This fork adds workspace folder, space, page, trash,
 
 ## Configure In Codex
 
+```
+codex mcp add appflowy -- uvx appflowy-mcp --env APPFLOWY_EMAIL="your-email" --env APPFLOWY_PASSWORD="your-password" 
+```
+
 ### Option 1: PyPI / uvx
+
+
 
 Use this after the package is published to PyPI. This is the simplest setup for daily use.
 
@@ -45,7 +51,13 @@ D:\codes\MCP\Appflowy-MCP
 D:\codes\MCP\Appflowy-MCP\main.py
 ```
 
-### Environment Variables
+## Configure In Claude-code
+
+```
+claude mcp add appflowy -- uvx appflowy -e APPFLOWY_EMAIL=your-email -e APPFLOWY_PASSWORD=your-password
+```
+
+## Environment Variables
 
 Set these environment variables:
 
