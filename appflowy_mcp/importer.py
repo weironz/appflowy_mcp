@@ -72,7 +72,10 @@ class MarkdownImporter:
     ) -> dict[str, Any] | None:
         index_file = self._index_file(directory_path)
         view_id = str(uuid.uuid4())
-        collab_id = str(uuid.uuid4())
+        # The document collab is stored with object_id == collab_id, but AppFlowy
+        # loads a view's document by view_id. They must match or the page opens
+        # with "Collab not found for object_id: <view_id>".
+        collab_id = view_id
         blocks: list[dict[str, Any]] = []
         asset_count = 0
 
@@ -138,7 +141,8 @@ class MarkdownImporter:
         page_kind: str,
     ) -> dict[str, Any] | None:
         view_id = str(uuid.uuid4())
-        collab_id = str(uuid.uuid4())
+        # collab_id must equal view_id; see _import_directory for details.
+        collab_id = view_id
         content = self._read_markdown(markdown_path)
         before = len(self.uploaded_assets)
         blocks = parse_markdown_to_blocks(

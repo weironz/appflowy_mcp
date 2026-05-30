@@ -3,6 +3,15 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 
+PARENT_VIEW_ID_DESC = (
+    "view_id of the parent Space or existing Page to create under. Must NOT be "
+    "the workspace_id: AppFlowy's hierarchy is workspace -> space -> page, and a "
+    "view created directly under the workspace root becomes a Space, not a "
+    "document. Call appflowy_list_spaces to pick a space (or appflowy_create_space "
+    "to make one) and pass its view_id here."
+)
+
+
 class LoginRequest(BaseModel):
     email: str | None = None
     password: str | None = None
@@ -39,7 +48,7 @@ class UpdateSpaceRequest(BaseModel):
 
 
 class CreatePageRequest(BaseModel):
-    parent_view_id: str
+    parent_view_id: str = Field(..., description=PARENT_VIEW_ID_DESC)
     name: str | None = None
     layout: int = Field(0, ge=0, le=4)
     page_data: dict[str, Any] | None = None
@@ -69,7 +78,7 @@ class AppendTextRequest(BaseModel):
 
 
 class CreateMarkdownPageRequest(BaseModel):
-    parent_view_id: str
+    parent_view_id: str = Field(..., description=PARENT_VIEW_ID_DESC)
     title: str = Field(..., min_length=1)
     content: str = Field(..., min_length=1)
     layout: int = Field(0, ge=0, le=4)
@@ -82,7 +91,7 @@ class AppendMarkdownRequest(BaseModel):
 
 
 class SavePageRequest(BaseModel):
-    parent_view_id: str
+    parent_view_id: str = Field(..., description=PARENT_VIEW_ID_DESC)
     title: str = Field(..., min_length=1)
     content: str = Field(..., min_length=1)
     content_format: str = "markdown"
@@ -97,13 +106,13 @@ class AppendPageContentRequest(BaseModel):
 
 
 class ImportMarkdownFileRequest(BaseModel):
-    parent_view_id: str
+    parent_view_id: str = Field(..., description=PARENT_VIEW_ID_DESC)
     path: str = Field(..., min_length=1)
     title: str | None = None
     upload_assets: bool = True
 
 
 class ImportMarkdownDirectoryRequest(BaseModel):
-    parent_view_id: str
+    parent_view_id: str = Field(..., description=PARENT_VIEW_ID_DESC)
     path: str = Field(..., min_length=1)
     upload_assets: bool = True

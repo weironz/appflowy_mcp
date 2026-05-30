@@ -54,6 +54,24 @@ def response_data(body):
     return body.get("data", body)
 
 
+def ensure_parent_is_not_workspace(workspace_id: str, parent_view_id: str) -> None:
+    """Guard against passing the workspace_id as a page parent.
+
+    AppFlowy's hierarchy is workspace -> space -> page. The workspace root
+    view_id equals the workspace_id, and any view created directly under it
+    becomes a Space, not a document. This is a silent footgun, so reject it
+    with an actionable message instead of creating an unexpected space.
+    """
+    if parent_view_id == workspace_id:
+        raise Exception(
+            "parent_view_id must be the view_id of a Space or an existing Page, "
+            "not the workspace_id. AppFlowy's hierarchy is workspace -> space -> "
+            "page; a view created directly under the workspace root becomes a "
+            "Space rather than a document. Call appflowy_list_spaces to pick a "
+            "space (or appflowy_create_space to make one) and pass its view_id."
+        )
+
+
 def walk_views(view):
     yield view
     for child in view.get("children") or []:
@@ -69,6 +87,13 @@ def create_page_with_blocks(
     view_id: str | None = None,
     collab_id: str | None = None,
 ):
+    # AppFlowy stores the document collab under object_id == collab_id, but loads
+    # a view's document by view_id. If only view_id is given, collab_id would
+    # default to a different server-generated uuid, making the page unreadable
+    # ("Collab not found"). Keep them in sync.
+    if view_id is not None and collab_id is None:
+        collab_id = view_id
+    ensure_parent_is_not_workspace(workspace_id, parent_view_id)
     payload = {
         "parent_view_id": parent_view_id,
         "layout": layout,
@@ -339,6 +364,7 @@ def appflowy_get_updated_rows(workspace_id: str, database_id: str, after: str):
 def appflowy_create_page(workspace_id: str, request: CreatePageRequest):
     """Create a document, grid, board, calendar, or chat page view."""
     ensure_authenticated()
+    ensure_parent_is_not_workspace(workspace_id, request.parent_view_id)
 
     try:
         body = client._request(
@@ -641,6 +667,7 @@ def appflowy_import_markdown_file(
 ):
     """Import one local Markdown file into AppFlowy."""
     ensure_authenticated()
+    ensure_parent_is_not_workspace(workspace_id, request.parent_view_id)
 
     try:
         importer = MarkdownImporter(client, workspace_id)
@@ -667,6 +694,7 @@ def appflowy_import_markdown_directory(
 ):
     """Import a local Markdown folder tree into AppFlowy."""
     ensure_authenticated()
+    ensure_parent_is_not_workspace(workspace_id, request.parent_view_id)
 
     try:
         importer = MarkdownImporter(client, workspace_id)
