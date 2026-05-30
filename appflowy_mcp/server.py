@@ -3,7 +3,9 @@ import os
 from fastmcp import FastMCP
 
 from .client import DEFAULT_BASE_URL, AppFlowyClient
+from .markdown import parse_markdown_to_blocks
 from .models import (
+    AppendMarkdownRequest,
     LoginRequest,
     RefreshTokenRequest,
     RowCreateRequest,
@@ -15,6 +17,7 @@ from .models import (
     FavoritePageRequest,
     AppendBlocksRequest,
     AppendTextRequest,
+    CreateMarkdownPageRequest,
 )
 from dotenv import load_dotenv
 
@@ -480,6 +483,62 @@ def appflowy_append_text_to_page(
         return response_data(body)
     except Exception as e:
         raise Exception(f"Failed to append text to page: {str(e)}")
+
+
+@mcp.tool(
+    name="appflowy_create_markdown_page",
+    description="Create a document page from Markdown content.",
+)
+def appflowy_create_markdown_page(
+    workspace_id: str, request: CreateMarkdownPageRequest
+):
+    """Create an AppFlowy document page with Markdown converted to blocks."""
+    ensure_authenticated()
+
+    try:
+        blocks = parse_markdown_to_blocks(request.content)
+        payload = {
+            "parent_view_id": request.parent_view_id,
+            "layout": request.layout,
+            "name": request.title,
+            "page_data": {
+                "type": "page",
+                "children": blocks,
+            },
+            "view_id": request.view_id,
+            "collab_id": request.collab_id,
+        }
+        body = client._request(
+            "POST",
+            f"/api/workspace/{workspace_id}/page-view",
+            json_body=payload,
+        )
+        data = response_data(body)
+        return {"page": data, "block_count": len(blocks)}
+    except Exception as e:
+        raise Exception(f"Failed to create markdown page: {str(e)}")
+
+
+@mcp.tool(
+    name="appflowy_append_markdown_to_page",
+    description="Append Markdown content to an existing document page.",
+)
+def appflowy_append_markdown_to_page(
+    workspace_id: str, page_id: str, request: AppendMarkdownRequest
+):
+    """Append Markdown converted to AppFlowy document blocks."""
+    ensure_authenticated()
+
+    try:
+        blocks = parse_markdown_to_blocks(request.content)
+        body = client._request(
+            "POST",
+            f"/api/workspace/{workspace_id}/page-view/{page_id}/append-block",
+            json_body={"blocks": blocks},
+        )
+        return {"result": response_data(body), "block_count": len(blocks)}
+    except Exception as e:
+        raise Exception(f"Failed to append markdown to page: {str(e)}")
 
 
 def main():

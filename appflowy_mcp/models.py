@@ -66,3 +66,16 @@ class AppendBlocksRequest(BaseModel):
 class AppendTextRequest(BaseModel):
     texts: list[str] = Field(..., min_length=1)
     block_type: str = "paragraph"
+
+
+class CreateMarkdownPageRequest(BaseModel):
+    parent_view_id: str
+    title: str = Field(..., min_length=1)
+    content: str = Field(..., min_length=1)
+    layout: int = Field(0, ge=0, le=4)
+    view_id: str | None = None
+    collab_id: str | None = None
+
+
+class AppendMarkdownRequest(BaseModel):
+    content: str = Field(..., min_length=1)

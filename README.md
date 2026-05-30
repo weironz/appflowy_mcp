@@ -105,8 +105,10 @@ To create a page inside a space, pass the workspace ID and use the space `view_i
 
 - `appflowy_append_text_to_page`
 - `appflowy_append_blocks_to_page`
+- `appflowy_create_markdown_page`
+- `appflowy_append_markdown_to_page`
 
-Page-content support currently covers appending new document blocks. AppFlowy exposes a high-level `append-block` endpoint, but not a matching high-level REST endpoint for deleting or editing arbitrary existing blocks. Page-level deletion through trash is supported.
+Page-content support covers appending new document blocks, creating pages from Markdown, and appending Markdown to existing pages. AppFlowy exposes a high-level `append-block` endpoint, but not a matching high-level REST endpoint for deleting or editing arbitrary existing blocks. Page-level deletion through trash is supported.
 
 Example paragraph block:
 
@@ -122,6 +124,18 @@ Example paragraph block:
   }
 }
 ```
+
+Example Markdown page:
+
+```json
+{
+  "parent_view_id": "space-or-page-view-id",
+  "title": "Meeting Notes",
+  "content": "# Meeting Notes\n\n- [ ] Follow up\n- **Important** decision\n\n```python\nprint(\"hello\")\n```"
+}
+```
+
+Markdown conversion supports headings, paragraphs, dividers, bullet lists, numbered lists, todo lists, quotes, code blocks, image links, and inline bold, italic, strikethrough, code, and links.
 
 ### Databases And Rows
 
