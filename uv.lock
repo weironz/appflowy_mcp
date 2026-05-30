@@ -36,9 +36,9 @@ wheels = [
 ]
 
 [[package]]
-name = "appflowy-cloud-mcp"
+name = "appflowy-mcp"
 version = "0.1.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "appflowysdk" },
     { name = "fastmcp" },

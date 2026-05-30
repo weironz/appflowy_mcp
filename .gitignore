@@ -3,3 +3,6 @@ README.md
 __pycache__
 .env
 .idea
+dist/
+build/
+*.egg-info/
