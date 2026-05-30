@@ -116,7 +116,7 @@ def create_page_with_blocks(
 
 @mcp.tool(
     name="appflowy_login",
-    description="Login to AppFlowy and get access token. Returns access token and refresh token.",
+    description="Login to AppFlowy. Tokens are stored in the server; they are not returned to avoid leaking credentials into tool output.",
 )
 def appflowy_login(request: LoginRequest):
     """Login to AppFlowy. Can use provided credentials or fallback to APPFLOWY_EMAIL/APPFLOWY_PASSWORD env vars."""
@@ -124,27 +124,28 @@ def appflowy_login(request: LoginRequest):
         client.email = request.email
     if request.password:
         client.password = request.password
-        
+
     if not client.email or not client.password:
         raise Exception("Email and password must be provided either in the request or via APPFLOWY_EMAIL and APPFLOWY_PASSWORD env vars")
-        
+
     try:
-        result = client.login()
-        return {"access_token": result.access_token, "refresh_token": result.refresh_token}
+        client.login()
+        return {"status": "authenticated"}
     except Exception as e:
         raise Exception(f"Login failed: {str(e)}")
 
 
 @mcp.tool(
     name="appflowy_refresh_token",
-    description="Refresh access token using refresh token.",
+    description="Refresh the access token. Uses the stored refresh token unless one is provided. Tokens are not returned.",
 )
 def appflowy_refresh_token(request: RefreshTokenRequest):
     """Refresh AppFlowy access token."""
-    client.token_store.set_refresh_token(request.refresh_token)
+    if request.refresh_token:
+        client.token_store.set_refresh_token(request.refresh_token)
     try:
-        result = client.refresh_token()
-        return {"access_token": result.access_token, "refresh_token": result.refresh_token}
+        client.refresh_token()
+        return {"status": "refreshed"}
     except Exception as e:
         raise Exception(f"Token refresh failed: {str(e)}")
 

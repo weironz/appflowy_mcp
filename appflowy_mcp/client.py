@@ -1,3 +1,4 @@
+import time
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote
@@ -6,6 +7,10 @@ import httpx
 
 
 DEFAULT_BASE_URL = "https://beta.appflowy.cloud"
+
+# Max row ids per row/detail request, to keep the `ids` query string well under
+# common URL-length limits when a database has many rows.
+ROW_DETAIL_BATCH_SIZE = 100
 
 
 @dataclass
@@ -48,7 +53,9 @@ class AppFlowyClient:
         self.password = password
         self.base_url = base_url.rstrip("/")
         self.token_store = TokenStore()
-        self._http_client = httpx.Client(timeout=30.0)
+        self._http_client = httpx.Client(timeout=60.0)
+        self._max_retries = 3
+        self._backoff_base = 0.5
 
     def login(self) -> TokenResponse:
         if not self.email or not self.password:
@@ -58,6 +65,7 @@ class AppFlowyClient:
             "POST",
             "/gotrue/token?grant_type=password",
             json_body={"email": self.email, "password": self.password},
+            allow_reauth=False,
         )
         token = TokenResponse(
             access_token=body["access_token"],
@@ -76,6 +84,7 @@ class AppFlowyClient:
             "POST",
             "/gotrue/token?grant_type=refresh_token",
             json_body={"refresh_token": refresh_token},
+            allow_reauth=False,
         )
         token = TokenResponse(
             access_token=body["access_token"],
@@ -118,16 +127,20 @@ class AppFlowyClient:
         if not row_ids:
             raise Exception("At least one row ID is required.")
 
-        params: dict[str, Any] = {"ids": ",".join(row_ids)}
-        if with_doc is not None:
-            params["with_doc"] = with_doc
+        results: list[dict[str, Any]] = []
+        for start in range(0, len(row_ids), ROW_DETAIL_BATCH_SIZE):
+            chunk = row_ids[start : start + ROW_DETAIL_BATCH_SIZE]
+            params: dict[str, Any] = {"ids": ",".join(chunk)}
+            if with_doc is not None:
+                params["with_doc"] = with_doc
 
-        body = self._request(
-            "GET",
-            f"/api/workspace/{workspace_id}/database/{database_id}/row/detail",
-            params=params,
-        )
-        return body.get("data", [])
+            body = self._request(
+                "GET",
+                f"/api/workspace/{workspace_id}/database/{database_id}/row/detail",
+                params=params,
+            )
+            results.extend(body.get("data", []))
+        return results
 
     def create_database_row(
         self,
@@ -226,17 +239,25 @@ class AppFlowyClient:
         path: str,
         params: dict[str, Any] | None = None,
         json_body: dict[str, Any] | None = None,
+        *,
+        allow_reauth: bool = True,
     ) -> dict[str, Any]:
-        response = self._http_client.request(
-            method=method,
-            url=f"{self.base_url}{path}",
-            headers=self._headers(),
-            params=params,
-            json={k: v for k, v in json_body.items() if v is not None}
+        json_payload = (
+            {k: v for k, v in json_body.items() if v is not None}
             if json_body is not None
-            else None,
+            else None
         )
-        return self._handle_response(response)
+
+        def build() -> httpx.Response:
+            return self._http_client.request(
+                method=method,
+                url=f"{self.base_url}{path}",
+                headers=self._headers(),
+                params=params,
+                json=json_payload,
+            )
+
+        return self._handle_response(self._send(build, allow_reauth=allow_reauth))
 
     def _request_content_json(
         self,
@@ -245,16 +266,68 @@ class AppFlowyClient:
         *,
         content: bytes,
         content_type: str,
+        allow_reauth: bool = True,
     ) -> dict[str, Any]:
-        headers = self._headers()
-        headers["Content-Type"] = content_type
-        response = self._http_client.request(
-            method=method,
-            url=f"{self.base_url}{path}",
-            headers=headers,
-            content=content,
-        )
-        return self._handle_response(response)
+        def build() -> httpx.Response:
+            headers = self._headers()
+            headers["Content-Type"] = content_type
+            return self._http_client.request(
+                method=method,
+                url=f"{self.base_url}{path}",
+                headers=headers,
+                content=content,
+            )
+
+        return self._handle_response(self._send(build, allow_reauth=allow_reauth))
+
+    def _send(self, build, *, allow_reauth: bool) -> httpx.Response:
+        """Send a request with one auto-reauth on 401 and backoff on 429/5xx.
+
+        `build` must (re)build and send the request each call, reading a fresh
+        Authorization header, so a token refreshed mid-flight is picked up.
+        """
+        attempt = 0
+        reauthed = False
+        while True:
+            response = build()
+            status = response.status_code
+
+            if status == 401 and allow_reauth and not reauthed:
+                reauthed = True
+                if self._reauthenticate():
+                    continue
+
+            if (status == 429 or status >= 500) and attempt < self._max_retries:
+                time.sleep(self._retry_delay(response, attempt))
+                attempt += 1
+                continue
+
+            return response
+
+    def _reauthenticate(self) -> bool:
+        """Refresh the access token, falling back to a fresh login."""
+        try:
+            if self.token_store.get_refresh_token():
+                self.refresh_token()
+                return True
+        except Exception:
+            pass
+        try:
+            if self.email and self.password:
+                self.login()
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _retry_delay(self, response: httpx.Response, attempt: int) -> float:
+        retry_after = response.headers.get("retry-after")
+        if retry_after:
+            try:
+                return float(retry_after)
+            except ValueError:
+                pass
+        return self._backoff_base * (2**attempt)
 
     def _headers(self) -> dict[str, str]:
         headers = {

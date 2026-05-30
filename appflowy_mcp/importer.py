@@ -56,6 +56,12 @@ class MarkdownImporter:
         if not path.is_dir():
             raise ValueError(f"Markdown directory does not exist: {path}")
 
+        if not self._subtree_has_markdown(path):
+            self.warnings.append(
+                f"No Markdown files found under {path}; nothing was imported."
+            )
+            return self._summary(root_page=None)
+
         root_page = self._import_directory(
             directory_path=path,
             parent_view_id=parent_view_id,
@@ -70,7 +76,9 @@ class MarkdownImporter:
         *,
         upload_assets: bool,
     ) -> dict[str, Any] | None:
-        index_file = self._index_file(directory_path)
+        # Precondition: the caller has verified this directory has Markdown in
+        # its subtree, so it is worth a page. One scan yields everything we need.
+        index_file, markdown_files, child_dirs = self._scan_dir(directory_path)
         view_id = str(uuid.uuid4())
         # The document collab is stored with object_id == collab_id, but AppFlowy
         # loads a view's document by view_id. They must match or the page opens
@@ -105,8 +113,8 @@ class MarkdownImporter:
         if not page:
             return None
 
-        for markdown_path in self._markdown_files(directory_path):
-            if index_file and markdown_path.resolve() == index_file.resolve():
+        for markdown_path in markdown_files:
+            if index_file is not None and markdown_path == index_file:
                 continue
             try:
                 self._create_markdown_page(
@@ -119,7 +127,11 @@ class MarkdownImporter:
             except Exception as e:
                 self.errors.append({"path": str(markdown_path), "error": str(e)})
 
-        for child_dir in self._child_directories(directory_path):
+        for child_dir in child_dirs:
+            if not self._subtree_has_markdown(child_dir):
+                # Asset-only / empty subfolder (e.g. "assets" with just images) —
+                # no document content, so don't create a page for it.
+                continue
             try:
                 self._import_directory(
                     directory_path=child_dir,
@@ -278,27 +290,40 @@ class MarkdownImporter:
             self.warnings.append(f"File is not valid UTF-8, decoded with replacement: {path}")
             return path.read_text(encoding="utf-8", errors="replace")
 
-    def _index_file(self, directory_path: Path) -> Path | None:
-        for item in sorted(directory_path.iterdir(), key=lambda p: p.name.lower()):
-            if item.is_file() and item.name.lower() in INDEX_FILENAMES:
-                return item
-        return None
+    def _scan_dir(
+        self, directory_path: Path
+    ) -> tuple[Path | None, list[Path], list[Path]]:
+        """Single listing of a directory.
 
-    def _markdown_files(self, directory_path: Path) -> list[Path]:
-        return [
-            item
-            for item in sorted(directory_path.iterdir(), key=lambda p: p.name.lower())
-            if item.is_file() and item.suffix.lower() in MARKDOWN_SUFFIXES
-        ]
+        Returns (index_file, markdown_files, child_dirs) so callers don't have
+        to iterate the same directory multiple times.
+        """
+        index_file: Path | None = None
+        markdown_files: list[Path] = []
+        child_dirs: list[Path] = []
+        try:
+            entries = sorted(directory_path.iterdir(), key=lambda p: p.name.lower())
+        except OSError:
+            return None, [], []
+        for item in entries:
+            if item.is_file():
+                if item.suffix.lower() in MARKDOWN_SUFFIXES:
+                    markdown_files.append(item)
+                    if index_file is None and item.name.lower() in INDEX_FILENAMES:
+                        index_file = item
+            elif (
+                item.is_dir()
+                and item.name not in IGNORED_DIRECTORIES
+                and not item.name.startswith(".")
+            ):
+                child_dirs.append(item)
+        return index_file, markdown_files, child_dirs
 
-    def _child_directories(self, directory_path: Path) -> list[Path]:
-        return [
-            item
-            for item in sorted(directory_path.iterdir(), key=lambda p: p.name.lower())
-            if item.is_dir()
-            and item.name not in IGNORED_DIRECTORIES
-            and not item.name.startswith(".")
-        ]
+    def _subtree_has_markdown(self, directory_path: Path) -> bool:
+        _, markdown_files, child_dirs = self._scan_dir(directory_path)
+        if markdown_files:
+            return True
+        return any(self._subtree_has_markdown(child) for child in child_dirs)
 
     def _summary(self, *, root_page: dict[str, Any] | None) -> dict[str, Any]:
         return {
