@@ -1,8 +1,12 @@
-.venv 
-README.md
-__pycache__
+.venv/
+.venv-*/
+__pycache__/
+*.py[cod]
 .env
 .idea
 dist/
 build/
 *.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/

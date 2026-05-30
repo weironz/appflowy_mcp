@@ -54,6 +54,8 @@ APPFLOWY_EMAIL=your-email@example.com
 APPFLOWY_PASSWORD=your-password
 ```
 
+With these variables set, tools automatically log in on first use. `appflowy_login` is still available when you want to provide credentials explicitly.
+
 ## AppFlowy Structure
 
 Most write operations need both a workspace and a parent view:

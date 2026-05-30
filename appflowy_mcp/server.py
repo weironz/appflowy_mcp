@@ -1,14 +1,11 @@
-from fastmcp import FastMCP
-import os
 import logging
+import os
+
+from fastmcp import FastMCP
+
 from .models import (
-    Task,
     LoginRequest,
     RefreshTokenRequest,
-    AuthResponse,
-    Workspace,
-    Database,
-    RowDetail,
     RowCreateRequest,
     RowUpdateRequest,
     CreateSpaceRequest,
@@ -22,7 +19,6 @@ from .models import (
 from dotenv import load_dotenv
 
 from appflowysdk import AppFlowy
-from appflowysdk.exceptions import AppFlowyError, LoginError, RefreshTokenError, APIError, ValidationError, NetworkError
 
 load_dotenv()
 logging.getLogger("appflowysdk").disabled = True
@@ -37,8 +33,15 @@ client = AppFlowy(
 
 
 def ensure_authenticated():
-    if not client.token_store.get_access_token():
-        raise Exception("Not authenticated. Please login first.")
+    if client.token_store.get_access_token():
+        return
+    if client.email and client.password:
+        try:
+            client.login()
+            return
+        except Exception as e:
+            raise Exception(f"Auto-login failed: {str(e)}")
+    raise Exception("Not authenticated. Please login first.")
 
 
 def response_data(body):
@@ -155,7 +158,7 @@ def appflowy_create_space(workspace_id: str, request: CreateSpaceRequest):
         body = client._request(
             "POST",
             f"/api/workspace/{workspace_id}/space",
-            json_body=request.model_dump(),
+            json_body=request.model_dump(exclude_none=True),
         )
         return response_data(body)
     except Exception as e:
@@ -171,7 +174,7 @@ def appflowy_update_space(workspace_id: str, space_id: str, request: UpdateSpace
         body = client._request(
             "PATCH",
             f"/api/workspace/{workspace_id}/space/{space_id}",
-            json_body=request.model_dump(),
+            json_body=request.model_dump(exclude_none=True),
         )
         return response_data(body)
     except Exception as e:
@@ -307,7 +310,7 @@ def appflowy_create_page(workspace_id: str, request: CreatePageRequest):
         body = client._request(
             "POST",
             f"/api/workspace/{workspace_id}/page-view",
-            json_body=request.model_dump(),
+            json_body=request.model_dump(exclude_none=True),
         )
         return response_data(body)
     except Exception as e:
@@ -339,7 +342,7 @@ def appflowy_update_page(
         body = client._request(
             "PATCH",
             f"/api/workspace/{workspace_id}/page-view/{page_id}",
-            json_body=request.model_dump(),
+            json_body=request.model_dump(exclude_none=True),
         )
         return response_data(body)
     except Exception as e:
@@ -401,7 +404,7 @@ def appflowy_favorite_page(
         body = client._request(
             "POST",
             f"/api/workspace/{workspace_id}/page-view/{page_id}/favorite",
-            json_body=request.model_dump(),
+            json_body=request.model_dump(exclude_none=True),
         )
         return response_data(body)
     except Exception as e:
@@ -446,7 +449,7 @@ def appflowy_append_blocks_to_page(
         body = client._request(
             "POST",
             f"/api/workspace/{workspace_id}/page-view/{page_id}/append-block",
-            json_body=request.model_dump(),
+            json_body=request.model_dump(exclude_none=True),
         )
         return response_data(body)
     except Exception as e:

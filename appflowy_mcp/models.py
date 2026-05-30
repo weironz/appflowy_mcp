@@ -1,83 +1,57 @@
-from pydantic import BaseModel
-from typing import Optional, Dict, Any, List
+from typing import Any
 
-# AppFlowy Cloud Models
+from pydantic import BaseModel, Field
 
 
 class LoginRequest(BaseModel):
-    email: Optional[str] = None
-    password: Optional[str] = None
+    email: str | None = None
+    password: str | None = None
 
 
 class RefreshTokenRequest(BaseModel):
     refresh_token: str
 
 
-class AuthResponse(BaseModel):
-    access_token: str
-    token_type: str
-    expires_in: int
-    refresh_token: str
-
-
-class Workspace(BaseModel):
-    id: str
-    name: str
-    database_id: Optional[str] = None
-
-
-class Database(BaseModel):
-    id: str
-    name: str
-    workspace_id: str
-
-
-class RowDetail(BaseModel):
-    id: str
-    cells: Dict[str, Any]
-    document: Optional[str] = None
-
-
 class RowCreateRequest(BaseModel):
-    cells: Dict[str, Any]
-    document: Optional[str] = None
+    cells: dict[str, Any]
+    document: str | None = None
 
 
 class RowUpdateRequest(BaseModel):
-    pre_hash: Optional[str] = None
-    cells: Dict[str, Any]
-    document: Optional[str] = None
+    pre_hash: str | None = None
+    cells: dict[str, Any]
+    document: str | None = None
 
 
 class CreateSpaceRequest(BaseModel):
     name: str
-    space_permission: int = 0
+    space_permission: int = Field(0, ge=0, le=1)
     space_icon: str = "interface_essential/home-3"
     space_icon_color: str = "0xFFA34AFD"
-    view_id: Optional[str] = None
+    view_id: str | None = None
 
 
 class UpdateSpaceRequest(BaseModel):
     name: str
-    space_permission: int = 0
+    space_permission: int = Field(0, ge=0, le=1)
     space_icon: str = "interface_essential/home-3"
     space_icon_color: str = "0xFFA34AFD"
 
 
 class CreatePageRequest(BaseModel):
     parent_view_id: str
-    name: Optional[str] = None
-    layout: int = 0
-    page_data: Optional[Dict[str, Any]] = None
-    view_id: Optional[str] = None
-    collab_id: Optional[str] = None
+    name: str | None = None
+    layout: int = Field(0, ge=0, le=4)
+    page_data: dict[str, Any] | None = None
+    view_id: str | None = None
+    collab_id: str | None = None
 
 
 class UpdatePageRequest(BaseModel):
     name: str
-    icon: Optional[Dict[str, Any]] = None
-    is_locked: Optional[bool] = None
-    extra: Optional[Dict[str, Any]] = None
+    icon: dict[str, Any] | None = None
+    is_locked: bool | None = None
+    extra: dict[str, Any] | None = None
 
 
 class FavoritePageRequest(BaseModel):
@@ -86,18 +60,9 @@ class FavoritePageRequest(BaseModel):
 
 
 class AppendBlocksRequest(BaseModel):
-    blocks: List[Dict[str, Any]]
+    blocks: list[dict[str, Any]] = Field(..., min_length=1)
 
 
 class AppendTextRequest(BaseModel):
-    texts: List[str]
+    texts: list[str] = Field(..., min_length=1)
     block_type: str = "paragraph"
-
-
-# Todoist Models (existing)
-class Task(BaseModel):
-    id: str | None = None
-    content: str
-    description: str
-    project_id: str | None = None
-    priority: int
