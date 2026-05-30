@@ -49,6 +49,51 @@ class RowUpdateRequest(BaseModel):
     document: Optional[str] = None
 
 
+class CreateSpaceRequest(BaseModel):
+    name: str
+    space_permission: int = 0
+    space_icon: str = "interface_essential/home-3"
+    space_icon_color: str = "0xFFA34AFD"
+    view_id: Optional[str] = None
+
+
+class UpdateSpaceRequest(BaseModel):
+    name: str
+    space_permission: int = 0
+    space_icon: str = "interface_essential/home-3"
+    space_icon_color: str = "0xFFA34AFD"
+
+
+class CreatePageRequest(BaseModel):
+    parent_view_id: str
+    name: Optional[str] = None
+    layout: int = 0
+    page_data: Optional[Dict[str, Any]] = None
+    view_id: Optional[str] = None
+    collab_id: Optional[str] = None
+
+
+class UpdatePageRequest(BaseModel):
+    name: str
+    icon: Optional[Dict[str, Any]] = None
+    is_locked: Optional[bool] = None
+    extra: Optional[Dict[str, Any]] = None
+
+
+class FavoritePageRequest(BaseModel):
+    is_favorite: bool = True
+    is_pinned: bool = False
+
+
+class AppendBlocksRequest(BaseModel):
+    blocks: List[Dict[str, Any]]
+
+
+class AppendTextRequest(BaseModel):
+    texts: List[str]
+    block_type: str = "paragraph"
+
+
 # Todoist Models (existing)
 class Task(BaseModel):
     id: str | None = None
