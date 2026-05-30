@@ -37,10 +37,9 @@ wheels = [
 
 [[package]]
 name = "appflowy-mcp"
-version = "0.1.1"
+version = "0.1.2"
 source = { editable = "." }
 dependencies = [
-    { name = "appflowysdk" },
     { name = "fastmcp" },
     { name = "httpx" },
     { name = "pydantic" },
@@ -49,24 +48,10 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "appflowysdk", specifier = ">=0.1.2" },
     { name = "fastmcp", specifier = ">=3.1.1" },
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "pydantic", specifier = ">=2.6.0" },
     { name = "python-dotenv", specifier = ">=1.2.2" },
-]
-
-[[package]]
-name = "appflowysdk"
-version = "0.1.2"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "httpx" },
-    { name = "pydantic" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/93/fa/33d5e77c5248bc5ba6129b846e48a69f3499d4ec4fc89165ebf74f433f31/appflowysdk-0.1.2.tar.gz", hash = "sha256:bc5a0d774e5a5b15de21ef9e27718576dad3ac2994dfeeaddb018d0a1eb7245e", size = 8892, upload-time = "2026-03-31T00:46:23.861Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/6f/fe/82b6f40769814bc2e6779041bfa95ae0dffa9eb6661303f5930041bbbf21/appflowysdk-0.1.2-py3-none-any.whl", hash = "sha256:5feffc8827f95628644bb732e2aec5a92c2b5160c02d824cee737c2023df7573", size = 9628, upload-time = "2026-03-31T00:46:22.943Z" },
 ]
 
 [[package]]

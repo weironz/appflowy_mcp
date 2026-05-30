@@ -1,12 +1,12 @@
 # AppFlowy MCP
 
-An MCP server for AppFlowy Cloud. This fork adds workspace folder, space, page, trash, favorite, and basic page-content tools on top of the original workspace/database/row tools.
+An MCP server for AppFlowy. This fork adds workspace folder, space, page, trash, favorite, and basic page-content tools on top of the original workspace/database/row tools.
 
 ## Requirements
 
 - Python 3.14
 - uv
-- AppFlowy Cloud account credentials
+- AppFlowy account credentials
 
 ## Configure In Codex
 
@@ -56,6 +56,14 @@ APPFLOWY_PASSWORD=your-password
 
 With these variables set, tools automatically log in on first use. `appflowy_login` is still available when you want to provide credentials explicitly.
 
+For self-hosted AppFlowy, also set the base URL:
+
+```text
+APPFLOWY_BASE_URL=http://localhost:8000
+```
+
+If omitted, `APPFLOWY_BASE_URL` defaults to `https://beta.appflowy.cloud`.
+
 ## AppFlowy Structure
 
 Most write operations need both a workspace and a parent view:
@@ -98,7 +106,7 @@ To create a page inside a space, pass the workspace ID and use the space `view_i
 - `appflowy_append_text_to_page`
 - `appflowy_append_blocks_to_page`
 
-Page-content support currently covers appending new document blocks. AppFlowy Cloud exposes a high-level `append-block` endpoint, but not a matching high-level REST endpoint for deleting or editing arbitrary existing blocks. Page-level deletion through trash is supported.
+Page-content support currently covers appending new document blocks. AppFlowy exposes a high-level `append-block` endpoint, but not a matching high-level REST endpoint for deleting or editing arbitrary existing blocks. Page-level deletion through trash is supported.
 
 Example paragraph block:
 
@@ -152,5 +160,5 @@ Do not commit PyPI tokens or write them into project files.
 ## Notes
 
 - Tokens are stored in memory by the MCP server process.
-- `APPFLOWY_EMAIL` and `APPFLOWY_PASSWORD` can also be provided through a local `.env` file.
-- Some page and space endpoints are implemented from AppFlowy Cloud source routes that are not present in the public OpenAPI document.
+- `APPFLOWY_EMAIL`, `APPFLOWY_PASSWORD`, and `APPFLOWY_BASE_URL` can also be provided through a local `.env` file.
+- Some page and space endpoints are implemented from AppFlowy source routes that are not present in the public OpenAPI document.

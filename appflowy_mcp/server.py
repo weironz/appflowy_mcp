@@ -1,8 +1,8 @@
-import logging
 import os
 
 from fastmcp import FastMCP
 
+from .client import DEFAULT_BASE_URL, AppFlowyClient
 from .models import (
     LoginRequest,
     RefreshTokenRequest,
@@ -18,17 +18,15 @@ from .models import (
 )
 from dotenv import load_dotenv
 
-from appflowysdk import AppFlowy
-
 load_dotenv()
-logging.getLogger("appflowysdk").disabled = True
 
-mcp = FastMCP("appflowy-cloud")
+mcp = FastMCP("appflowy")
 
 # Global AppFlowy client
-client = AppFlowy(
+client = AppFlowyClient(
     email=os.getenv("APPFLOWY_EMAIL"),
-    password=os.getenv("APPFLOWY_PASSWORD")
+    password=os.getenv("APPFLOWY_PASSWORD"),
+    base_url=os.getenv("APPFLOWY_BASE_URL") or DEFAULT_BASE_URL,
 )
 
 
@@ -57,10 +55,10 @@ def walk_views(view):
 
 @mcp.tool(
     name="appflowy_login",
-    description="Login to AppFlowy Cloud and get access token. Returns access token and refresh token.",
+    description="Login to AppFlowy and get access token. Returns access token and refresh token.",
 )
 def appflowy_login(request: LoginRequest):
-    """Login to AppFlowy Cloud. Can use provided credentials or fallback to APPFLOWY_EMAIL/APPFLOWY_PASSWORD env vars."""
+    """Login to AppFlowy. Can use provided credentials or fallback to APPFLOWY_EMAIL/APPFLOWY_PASSWORD env vars."""
     if request.email:
         client.email = request.email
     if request.password:
@@ -81,7 +79,7 @@ def appflowy_login(request: LoginRequest):
     description="Refresh access token using refresh token.",
 )
 def appflowy_refresh_token(request: RefreshTokenRequest):
-    """Refresh AppFlowy Cloud access token."""
+    """Refresh AppFlowy access token."""
     client.token_store.set_refresh_token(request.refresh_token)
     try:
         result = client.refresh_token()
@@ -207,7 +205,7 @@ def appflowy_get_database_fields(workspace_id: str, database_id: str):
 
     try:
         fields = client.get_database_fields(workspace_id, database_id)
-        return [f.model_dump() for f in fields]
+        return fields
     except Exception as e:
         raise Exception(f"Failed to get database fields: {str(e)}")
 
@@ -221,7 +219,7 @@ def appflowy_list_rows(workspace_id: str, database_id: str):
 
     try:
         rows = client.get_database_row_ids(workspace_id, database_id)
-        return [r.model_dump() for r in rows]
+        return rows
     except Exception as e:
         raise Exception(f"Failed to list rows: {str(e)}")
 
@@ -243,7 +241,7 @@ def appflowy_get_row_details(
         details = client.get_database_row_details(
             workspace_id, database_id, ids_list, with_doc=with_doc
         )
-        return [d.model_dump() for d in details]
+        return details
     except Exception as e:
         raise Exception(f"Failed to get row details: {str(e)}")
 
@@ -294,7 +292,7 @@ def appflowy_get_updated_rows(workspace_id: str, database_id: str, after: str):
         updated_rows = client.get_database_row_ids_updated(
             workspace_id, database_id, after=after
         )
-        return [r.model_dump() for r in updated_rows]
+        return updated_rows
     except Exception as e:
         raise Exception(f"Failed to get updated rows: {str(e)}")
 
