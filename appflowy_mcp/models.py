@@ -68,6 +68,25 @@ class FavoritePageRequest(BaseModel):
     is_pinned: bool = False
 
 
+class MovePageRequest(BaseModel):
+    new_parent_view_id: str = Field(
+        ...,
+        description=(
+            "view_id of the destination parent Space or Page. To REORDER a page "
+            "in place, pass its current parent_view_id here. Must NOT be the "
+            "workspace_id (a child of the workspace root becomes a Space)."
+        ),
+    )
+    prev_view_id: str | None = Field(
+        None,
+        description=(
+            "Ordering: view_id of the sibling to place this page immediately "
+            "AFTER. Omit / null to make it the first child. This is how pages are "
+            "reordered among their siblings."
+        ),
+    )
+
+
 class AppendBlocksRequest(BaseModel):
     blocks: list[dict[str, Any]] = Field(..., min_length=1)
 

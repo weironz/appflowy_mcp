@@ -17,6 +17,7 @@ from .models import (
     CreatePageRequest,
     UpdatePageRequest,
     FavoritePageRequest,
+    MovePageRequest,
     AppendBlocksRequest,
     AppendTextRequest,
     CreateMarkdownPageRequest,
@@ -408,6 +409,31 @@ def appflowy_update_page(
         return response_data(body)
     except Exception as e:
         raise Exception(f"Failed to update page: {str(e)}")
+
+
+@mcp.tool(
+    name="appflowy_move_page",
+    description=(
+        "Move a page to a new parent and/or reorder it among its siblings. "
+        "Set new_parent_view_id to the destination parent (pass the page's "
+        "current parent to reorder in place) and prev_view_id to the sibling to "
+        "place it after (omit to put it first)."
+    ),
+)
+def appflowy_move_page(workspace_id: str, page_id: str, request: MovePageRequest):
+    """Move and/or reorder an AppFlowy page view."""
+    ensure_authenticated()
+    ensure_parent_is_not_workspace(workspace_id, request.new_parent_view_id)
+
+    try:
+        body = client._request(
+            "POST",
+            f"/api/workspace/{workspace_id}/page-view/{page_id}/move",
+            json_body=request.model_dump(exclude_none=True),
+        )
+        return response_data(body)
+    except Exception as e:
+        raise Exception(f"Failed to move page: {str(e)}")
 
 
 @mcp.tool(name="appflowy_move_page_to_trash", description="Move a page to trash.")
