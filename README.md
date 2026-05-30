@@ -52,12 +52,7 @@ Set these environment variables:
 ```text
 APPFLOWY_EMAIL=your-email@example.com
 APPFLOWY_PASSWORD=your-password
-FASTMCP_SHOW_SERVER_BANNER=false
-FASTMCP_CHECK_FOR_UPDATES=off
-FASTMCP_LOG_ENABLED=false
 ```
-
-The FastMCP variables keep stdio clean for MCP handshakes.
 
 ## AppFlowy Structure
 
