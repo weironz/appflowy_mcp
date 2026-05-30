@@ -94,3 +94,16 @@ class SavePageRequest(BaseModel):
 class AppendPageContentRequest(BaseModel):
     content: str = Field(..., min_length=1)
     content_format: str = "markdown"
+
+
+class ImportMarkdownFileRequest(BaseModel):
+    parent_view_id: str
+    path: str = Field(..., min_length=1)
+    title: str | None = None
+    upload_assets: bool = True
+
+
+class ImportMarkdownDirectoryRequest(BaseModel):
+    parent_view_id: str
+    path: str = Field(..., min_length=1)
+    upload_assets: bool = True

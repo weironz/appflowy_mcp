@@ -109,6 +109,8 @@ To create a page inside a space, pass the workspace ID and use the space `view_i
 - `appflowy_append_blocks_to_page`
 - `appflowy_create_markdown_page`
 - `appflowy_append_markdown_to_page`
+- `appflowy_import_markdown_file`
+- `appflowy_import_markdown_directory`
 
 Page-content support covers appending new document blocks, creating pages from Markdown, and appending Markdown to existing pages. AppFlowy exposes a high-level `append-block` endpoint, but not a matching high-level REST endpoint for deleting or editing arbitrary existing blocks. Page-level deletion through trash is supported.
 
@@ -143,6 +145,50 @@ Example Markdown page:
 ```
 
 Markdown conversion supports headings, paragraphs, dividers, bullet lists, numbered lists, todo lists, quotes, code blocks, image links, and inline bold, italic, strikethrough, code, and links.
+
+### Markdown Import
+
+Use `appflowy_import_markdown_file` to import one local Markdown file as an AppFlowy page. Use `appflowy_import_markdown_directory` to recursively import a local folder tree.
+
+Directory import maps local structure directly to AppFlowy:
+
+```text
+local folder -> AppFlowy page
+local subfolder -> AppFlowy subpage
+local .md/.markdown file -> AppFlowy page
+```
+
+`README.md` or `index.md` becomes the content of its folder page instead of a separate child page. Other Markdown files in the same folder become child pages. Hidden folders plus `.git`, `.hg`, `.svn`, `.idea`, `.vscode`, `node_modules`, and `__pycache__` are skipped.
+
+Local image references are resolved relative to the Markdown file, uploaded to AppFlowy file storage, and replaced with AppFlowy file URLs:
+
+```markdown
+![Architecture](./images/architecture.png)
+![Screenshot](../assets/screenshot.png)
+```
+
+Remote image URLs such as `https://...` are kept as-is. Missing local images are reported in the import result warnings, while other files continue importing.
+
+Example directory import:
+
+```json
+{
+  "parent_view_id": "space-or-page-view-id",
+  "path": "D:\\notes",
+  "upload_assets": true
+}
+```
+
+Example single-file import:
+
+```json
+{
+  "parent_view_id": "space-or-page-view-id",
+  "path": "D:\\notes\\MCP\\config.md",
+  "title": "MCP Config",
+  "upload_assets": true
+}
+```
 
 ### Databases And Rows
 

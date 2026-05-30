@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -181,6 +182,44 @@ class AppFlowyClient:
         )
         return body.get("data", [])
 
+    def upload_file_blob_v1(
+        self,
+        workspace_id: str,
+        parent_dir: str,
+        *,
+        content: bytes,
+        content_type: str = "application/octet-stream",
+    ) -> dict[str, Any]:
+        encoded_parent_dir = quote(parent_dir, safe="")
+        body = self._request_content_json(
+            "PUT",
+            f"/api/file_storage/{workspace_id}/v1/blob/{encoded_parent_dir}",
+            content=content,
+            content_type=content_type,
+        )
+        data = body.get("data", body)
+        if not isinstance(data, dict):
+            raise Exception("Expected file upload response data to be an object.")
+        file_id = data.get("file_id")
+        if not file_id:
+            raise Exception("File upload response did not include file_id.")
+        return {
+            **data,
+            "workspace_id": workspace_id,
+            "parent_dir": parent_dir,
+            "url": self.file_blob_url_v1(workspace_id, parent_dir, str(file_id)),
+            "content_type": content_type,
+            "content_length": len(content),
+        }
+
+    def file_blob_url_v1(self, workspace_id: str, parent_dir: str, file_id: str) -> str:
+        encoded_parent_dir = quote(parent_dir, safe="")
+        encoded_file_id = quote(file_id, safe="")
+        return (
+            f"{self.base_url}/api/file_storage/{workspace_id}/v1/blob/"
+            f"{encoded_parent_dir}/{encoded_file_id}"
+        )
+
     def _request(
         self,
         method: str,
@@ -196,6 +235,24 @@ class AppFlowyClient:
             json={k: v for k, v in json_body.items() if v is not None}
             if json_body is not None
             else None,
+        )
+        return self._handle_response(response)
+
+    def _request_content_json(
+        self,
+        method: str,
+        path: str,
+        *,
+        content: bytes,
+        content_type: str,
+    ) -> dict[str, Any]:
+        headers = self._headers()
+        headers["Content-Type"] = content_type
+        response = self._http_client.request(
+            method=method,
+            url=f"{self.base_url}{path}",
+            headers=headers,
+            content=content,
         )
         return self._handle_response(response)
 

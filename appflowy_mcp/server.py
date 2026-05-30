@@ -3,6 +3,7 @@ import os
 from fastmcp import FastMCP
 
 from .client import DEFAULT_BASE_URL, AppFlowyClient
+from .importer import MarkdownImporter
 from .markdown import parse_content_to_blocks, parse_markdown_to_blocks
 from .models import (
     AppendPageContentRequest,
@@ -19,6 +20,8 @@ from .models import (
     AppendBlocksRequest,
     AppendTextRequest,
     CreateMarkdownPageRequest,
+    ImportMarkdownDirectoryRequest,
+    ImportMarkdownFileRequest,
     SavePageRequest,
 )
 from dotenv import load_dotenv
@@ -623,6 +626,57 @@ def appflowy_append_page_content(
         }
     except Exception as e:
         raise Exception(f"Failed to append page content: {str(e)}")
+
+
+@mcp.tool(
+    name="appflowy_import_markdown_file",
+    description=(
+        "Import one local Markdown file as an AppFlowy page. Local image references "
+        "in Markdown are resolved relative to the file, uploaded to AppFlowy, and "
+        "replaced with AppFlowy file URLs when upload_assets is true."
+    ),
+)
+def appflowy_import_markdown_file(
+    workspace_id: str, request: ImportMarkdownFileRequest
+):
+    """Import one local Markdown file into AppFlowy."""
+    ensure_authenticated()
+
+    try:
+        importer = MarkdownImporter(client, workspace_id)
+        return importer.import_file(
+            request.path,
+            request.parent_view_id,
+            title=request.title,
+            upload_assets=request.upload_assets,
+        )
+    except Exception as e:
+        raise Exception(f"Failed to import markdown file: {str(e)}")
+
+
+@mcp.tool(
+    name="appflowy_import_markdown_directory",
+    description=(
+        "Recursively import a local Markdown directory into AppFlowy. Every local "
+        "folder becomes an AppFlowy page, Markdown files become child pages, and "
+        "local image references are uploaded and inserted in place."
+    ),
+)
+def appflowy_import_markdown_directory(
+    workspace_id: str, request: ImportMarkdownDirectoryRequest
+):
+    """Import a local Markdown folder tree into AppFlowy."""
+    ensure_authenticated()
+
+    try:
+        importer = MarkdownImporter(client, workspace_id)
+        return importer.import_directory(
+            request.path,
+            request.parent_view_id,
+            upload_assets=request.upload_assets,
+        )
+    except Exception as e:
+        raise Exception(f"Failed to import markdown directory: {str(e)}")
 
 
 def main():

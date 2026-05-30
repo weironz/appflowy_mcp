@@ -1,5 +1,6 @@
 import re
 from typing import Any
+from collections.abc import Callable
 
 
 INLINE_PATTERN = re.compile(
@@ -12,6 +13,7 @@ INLINE_PATTERN = re.compile(
 
 ORDERED_LIST_PATTERN = re.compile(r"^\d+\.\s+(.+)$")
 IMAGE_PATTERN = re.compile(r"^!\[(?P<alt>[^\]]*)\]\((?P<url>[^)]+)\)$")
+INLINE_IMAGE_PATTERN = re.compile(r"!\[(?P<alt>[^\]]*)\]\((?P<url>[^)]+)\)")
 
 
 def parse_rich_text(text: str) -> list[dict[str, Any]]:
@@ -61,7 +63,10 @@ def parse_rich_text(text: str) -> list[dict[str, Any]]:
     return deltas
 
 
-def parse_markdown_to_blocks(content: str) -> list[dict[str, Any]]:
+def parse_markdown_to_blocks(
+    content: str,
+    image_url_resolver: Callable[[str, str], str] | None = None,
+) -> list[dict[str, Any]]:
     blocks: list[dict[str, Any]] = []
     code_lines: list[str] = []
     code_language = ""
@@ -99,12 +104,16 @@ def parse_markdown_to_blocks(content: str) -> list[dict[str, Any]]:
 
         image = IMAGE_PATTERN.match(stripped)
         if image:
+            image_url = image.group("url")
+            image_caption = image.group("alt")
+            if image_url_resolver:
+                image_url = image_url_resolver(image_url, image_caption)
             blocks.append(
                 {
                     "type": "image",
                     "data": {
-                        "url": image.group("url"),
-                        "caption": image.group("alt"),
+                        "url": image_url,
+                        "caption": image_caption,
                     },
                 }
             )
@@ -160,12 +169,7 @@ def parse_markdown_to_blocks(content: str) -> list[dict[str, Any]]:
             )
             continue
 
-        blocks.append(
-            {
-                "type": "paragraph",
-                "data": {"delta": parse_rich_text(line)},
-            }
-        )
+        blocks.extend(_blocks_from_inline_images(line, image_url_resolver))
 
     if in_code_block and code_lines:
         blocks.append(
@@ -209,5 +213,50 @@ def _heading_block(level: int, text: str) -> dict[str, Any]:
         "data": {
             "level": level,
             "delta": parse_rich_text(text),
+        },
+    }
+
+
+def _blocks_from_inline_images(
+    line: str,
+    image_url_resolver: Callable[[str, str], str] | None,
+) -> list[dict[str, Any]]:
+    blocks: list[dict[str, Any]] = []
+    last_end = 0
+
+    for match in INLINE_IMAGE_PATTERN.finditer(line):
+        start, end = match.span()
+        if start > last_end:
+            blocks.append(_paragraph_block(line[last_end:start]))
+
+        image_url = match.group("url")
+        image_caption = match.group("alt")
+        if image_url_resolver:
+            image_url = image_url_resolver(image_url, image_caption)
+        blocks.append(_image_block(image_url, image_caption))
+        last_end = end
+
+    if not blocks:
+        return [_paragraph_block(line)]
+
+    if last_end < len(line):
+        blocks.append(_paragraph_block(line[last_end:]))
+
+    return blocks
+
+
+def _paragraph_block(text: str) -> dict[str, Any]:
+    return {
+        "type": "paragraph",
+        "data": {"delta": parse_rich_text(text)},
+    }
+
+
+def _image_block(url: str, caption: str) -> dict[str, Any]:
+    return {
+        "type": "image",
+        "data": {
+            "url": url,
+            "caption": caption,
         },
     }
