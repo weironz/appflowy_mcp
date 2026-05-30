@@ -109,6 +109,24 @@ Example paragraph block:
 uv run appflowy-mcp
 ```
 
+## Publish To PyPI
+
+Build and check the package:
+
+```bash
+uv build
+uv publish --dry-run --trusted-publishing never
+```
+
+Publish with a PyPI API token:
+
+```powershell
+$env:UV_PUBLISH_TOKEN="pypi-your-token"
+uv publish --trusted-publishing never
+```
+
+Do not commit PyPI tokens or write them into project files.
+
 ## Notes
 
 - Tokens are stored in memory by the MCP server process.
