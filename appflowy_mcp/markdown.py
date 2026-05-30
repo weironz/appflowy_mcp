@@ -181,6 +181,28 @@ def parse_markdown_to_blocks(content: str) -> list[dict[str, Any]]:
     return blocks
 
 
+def parse_plain_text_to_blocks(content: str) -> list[dict[str, Any]]:
+    lines = content.splitlines() or [""]
+    return [
+        {
+            "type": "paragraph",
+            "data": {"delta": [{"insert": line}]},
+        }
+        for line in lines
+    ]
+
+
+def parse_content_to_blocks(
+    content: str, content_format: str = "markdown"
+) -> list[dict[str, Any]]:
+    normalized = content_format.strip().lower()
+    if normalized in {"markdown", "md"}:
+        return parse_markdown_to_blocks(content)
+    if normalized in {"plain_text", "plaintext", "text", "plain"}:
+        return parse_plain_text_to_blocks(content)
+    raise ValueError("content_format must be 'markdown' or 'plain_text'.")
+
+
 def _heading_block(level: int, text: str) -> dict[str, Any]:
     return {
         "type": "heading",

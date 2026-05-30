@@ -103,12 +103,18 @@ To create a page inside a space, pass the workspace ID and use the space `view_i
 
 ### Page Content
 
+- `appflowy_save_page`
+- `appflowy_append_page_content`
 - `appflowy_append_text_to_page`
 - `appflowy_append_blocks_to_page`
 - `appflowy_create_markdown_page`
 - `appflowy_append_markdown_to_page`
 
 Page-content support covers appending new document blocks, creating pages from Markdown, and appending Markdown to existing pages. AppFlowy exposes a high-level `append-block` endpoint, but not a matching high-level REST endpoint for deleting or editing arbitrary existing blocks. Page-level deletion through trash is supported.
+
+When saving AI answers, notes, summaries, or generated content into AppFlowy, use `appflowy_save_page` by default. Its `content_format` field defaults to `markdown`, so agents do not need to ask users to say "save as Markdown" every time. Set `content_format` to `plain_text` only when the user explicitly wants the content preserved as literal plain text.
+
+Use `appflowy_append_page_content` by default when adding AI-generated content to an existing page. It also treats content as Markdown unless `content_format` is set to `plain_text`.
 
 Example paragraph block:
 
@@ -131,7 +137,8 @@ Example Markdown page:
 {
   "parent_view_id": "space-or-page-view-id",
   "title": "Meeting Notes",
-  "content": "# Meeting Notes\n\n- [ ] Follow up\n- **Important** decision\n\n```python\nprint(\"hello\")\n```"
+  "content": "# Meeting Notes\n\n- [ ] Follow up\n- **Important** decision\n\n```python\nprint(\"hello\")\n```",
+  "content_format": "markdown"
 }
 ```
 

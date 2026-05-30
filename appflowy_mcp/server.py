@@ -3,8 +3,9 @@ import os
 from fastmcp import FastMCP
 
 from .client import DEFAULT_BASE_URL, AppFlowyClient
-from .markdown import parse_markdown_to_blocks
+from .markdown import parse_content_to_blocks, parse_markdown_to_blocks
 from .models import (
+    AppendPageContentRequest,
     AppendMarkdownRequest,
     LoginRequest,
     RefreshTokenRequest,
@@ -18,6 +19,7 @@ from .models import (
     AppendBlocksRequest,
     AppendTextRequest,
     CreateMarkdownPageRequest,
+    SavePageRequest,
 )
 from dotenv import load_dotenv
 
@@ -53,6 +55,34 @@ def walk_views(view):
     yield view
     for child in view.get("children") or []:
         yield from walk_views(child)
+
+
+def create_page_with_blocks(
+    workspace_id: str,
+    parent_view_id: str,
+    title: str,
+    blocks: list[dict],
+    layout: int = 0,
+    view_id: str | None = None,
+    collab_id: str | None = None,
+):
+    payload = {
+        "parent_view_id": parent_view_id,
+        "layout": layout,
+        "name": title,
+        "page_data": {
+            "type": "page",
+            "children": blocks,
+        },
+        "view_id": view_id,
+        "collab_id": collab_id,
+    }
+    body = client._request(
+        "POST",
+        f"/api/workspace/{workspace_id}/page-view",
+        json_body=payload,
+    )
+    return response_data(body)
 
 # ==================== AUTHENTICATION TOOLS ====================
 
@@ -487,7 +517,7 @@ def appflowy_append_text_to_page(
 
 @mcp.tool(
     name="appflowy_create_markdown_page",
-    description="Create a document page from Markdown content.",
+    description="Create a document page from Markdown content. Prefer appflowy_save_page for general AI answer or note saving.",
 )
 def appflowy_create_markdown_page(
     workspace_id: str, request: CreateMarkdownPageRequest
@@ -497,23 +527,15 @@ def appflowy_create_markdown_page(
 
     try:
         blocks = parse_markdown_to_blocks(request.content)
-        payload = {
-            "parent_view_id": request.parent_view_id,
-            "layout": request.layout,
-            "name": request.title,
-            "page_data": {
-                "type": "page",
-                "children": blocks,
-            },
-            "view_id": request.view_id,
-            "collab_id": request.collab_id,
-        }
-        body = client._request(
-            "POST",
-            f"/api/workspace/{workspace_id}/page-view",
-            json_body=payload,
+        data = create_page_with_blocks(
+            workspace_id=workspace_id,
+            parent_view_id=request.parent_view_id,
+            title=request.title,
+            blocks=blocks,
+            layout=request.layout,
+            view_id=request.view_id,
+            collab_id=request.collab_id,
         )
-        data = response_data(body)
         return {"page": data, "block_count": len(blocks)}
     except Exception as e:
         raise Exception(f"Failed to create markdown page: {str(e)}")
@@ -539,6 +561,68 @@ def appflowy_append_markdown_to_page(
         return {"result": response_data(body), "block_count": len(blocks)}
     except Exception as e:
         raise Exception(f"Failed to append markdown to page: {str(e)}")
+
+
+@mcp.tool(
+    name="appflowy_save_page",
+    description=(
+        "Default tool for saving AI answers, notes, summaries, or generated content "
+        "as a new AppFlowy document page. The content_format defaults to markdown, "
+        "so Markdown headings, lists, links, code blocks, and rich text are converted "
+        "to AppFlowy blocks unless content_format is explicitly set to plain_text."
+    ),
+)
+def appflowy_save_page(workspace_id: str, request: SavePageRequest):
+    """Save generated content as a new AppFlowy page, using Markdown by default."""
+    ensure_authenticated()
+
+    try:
+        blocks = parse_content_to_blocks(request.content, request.content_format)
+        data = create_page_with_blocks(
+            workspace_id=workspace_id,
+            parent_view_id=request.parent_view_id,
+            title=request.title,
+            blocks=blocks,
+            layout=request.layout,
+            view_id=request.view_id,
+            collab_id=request.collab_id,
+        )
+        return {
+            "page": data,
+            "block_count": len(blocks),
+            "content_format": request.content_format,
+        }
+    except Exception as e:
+        raise Exception(f"Failed to save page: {str(e)}")
+
+
+@mcp.tool(
+    name="appflowy_append_page_content",
+    description=(
+        "Default tool for appending AI answers, notes, summaries, or generated content "
+        "to an existing AppFlowy document page. The content_format defaults to markdown."
+    ),
+)
+def appflowy_append_page_content(
+    workspace_id: str, page_id: str, request: AppendPageContentRequest
+):
+    """Append generated content to a page, using Markdown by default."""
+    ensure_authenticated()
+
+    try:
+        blocks = parse_content_to_blocks(request.content, request.content_format)
+        body = client._request(
+            "POST",
+            f"/api/workspace/{workspace_id}/page-view/{page_id}/append-block",
+            json_body={"blocks": blocks},
+        )
+        return {
+            "result": response_data(body),
+            "block_count": len(blocks),
+            "content_format": request.content_format,
+        }
+    except Exception as e:
+        raise Exception(f"Failed to append page content: {str(e)}")
 
 
 def main():

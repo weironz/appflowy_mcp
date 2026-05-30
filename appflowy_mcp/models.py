@@ -79,3 +79,18 @@ class CreateMarkdownPageRequest(BaseModel):
 
 class AppendMarkdownRequest(BaseModel):
     content: str = Field(..., min_length=1)
+
+
+class SavePageRequest(BaseModel):
+    parent_view_id: str
+    title: str = Field(..., min_length=1)
+    content: str = Field(..., min_length=1)
+    content_format: str = "markdown"
+    layout: int = Field(0, ge=0, le=4)
+    view_id: str | None = None
+    collab_id: str | None = None
+
+
+class AppendPageContentRequest(BaseModel):
+    content: str = Field(..., min_length=1)
+    content_format: str = "markdown"
