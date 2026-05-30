@@ -10,7 +10,11 @@ An MCP server for AppFlowy Cloud. This fork adds workspace folder, space, page, 
 
 ## Configure In Codex
 
-After publishing to PyPI, use `uvx` as the command:
+### Option 1: PyPI / uvx
+
+Use this after the package is published to PyPI. This is the simplest setup for daily use.
+
+Use `uvx` as the command:
 
 ```text
 uvx
@@ -21,6 +25,27 @@ Use these arguments:
 ```text
 appflowy-mcp
 ```
+
+### Option 2: Local Source / uv
+
+Use this when developing the MCP locally or running directly from a cloned repository.
+
+Use `uv` as the command:
+
+```text
+uv
+```
+
+Use these arguments:
+
+```text
+run
+--project
+D:\codes\MCP\Appflowy-MCP
+D:\codes\MCP\Appflowy-MCP\main.py
+```
+
+### Environment Variables
 
 Set these environment variables:
 
