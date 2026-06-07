@@ -11,6 +11,7 @@ import argparse
 import getpass
 import json
 import os
+import re
 import sys
 from importlib.metadata import version
 from pathlib import Path
@@ -97,6 +98,61 @@ def emit(args, data, human):
         print(json.dumps(data, indent=2, ensure_ascii=False))
     else:
         human(data)
+
+
+UUID_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+
+
+def resolve_workspace(token: str) -> str:
+    """Accept a workspace id or name; resolve names to ids."""
+    if UUID_RE.match(token):
+        return token
+    workspaces = response_data(client._request("GET", "/api/workspace"))
+    matches = [
+        ws for ws in workspaces
+        if (ws.get("workspace_name") or "").casefold() == token.casefold()
+    ]
+    if len(matches) == 1:
+        return matches[0]["workspace_id"]
+    names = ", ".join(sorted(ws.get("workspace_name", "?") for ws in workspaces))
+    kind = "Ambiguous" if matches else "Unknown"
+    raise Exception(f"{kind} workspace '{token}'. Available: {names}")
+
+
+def resolve_view(workspace_id: str, token: str) -> str:
+    """Accept a view id or name; resolve names by walking the folder tree."""
+    if UUID_RE.match(token):
+        return token
+    body = client._request(
+        "GET", f"/api/workspace/{workspace_id}/folder", params={"depth": 10}
+    )
+    views = list(walk_views(response_data(body)))
+    matches = [
+        v for v in views if (v.get("name") or "").casefold() == token.casefold()
+    ]
+    if len(matches) == 1:
+        return matches[0]["view_id"]
+    if matches:
+        listing = ", ".join(f"{v.get('name')} ({v.get('view_id')})" for v in matches)
+        raise Exception(
+            f"Ambiguous view name '{token}' — pass a view_id instead: {listing}"
+        )
+    raise Exception(
+        f"No space or page named '{token}' in this workspace. "
+        "Run `appflowy-cli folder <workspace>` to list views."
+    )
+
+
+def resolve_args(args) -> None:
+    if getattr(args, "workspace", None):
+        args.workspace = resolve_workspace(args.workspace)
+        for attr in ("space", "page", "parent", "root"):
+            value = getattr(args, attr, None)
+            if value:
+                setattr(args, attr, resolve_view(args.workspace, value))
 
 
 def cmd_workspaces(args):
@@ -282,45 +338,45 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_workspaces)
 
     p = sub.add_parser("spaces", help="List spaces in a workspace.")
-    p.add_argument("workspace")
+    p.add_argument("workspace", help="workspace id or name")
     p.set_defaults(func=cmd_spaces)
 
     p = sub.add_parser("folder", help="Print the folder tree of a workspace.")
-    p.add_argument("workspace")
+    p.add_argument("workspace", help="workspace id or name")
     p.add_argument("--depth", type=int, default=10)
     p.add_argument("--root", help="root view_id to expand (default: workspace root)")
     p.set_defaults(func=cmd_folder)
 
     p = sub.add_parser("search", help="Full-text search a workspace.")
-    p.add_argument("workspace")
+    p.add_argument("workspace", help="workspace id or name")
     p.add_argument("query")
     p.add_argument("--limit", type=int, default=10)
     p.set_defaults(func=cmd_search)
 
     p = sub.add_parser("export-page", help="Export one page to a Markdown file.")
-    p.add_argument("workspace")
-    p.add_argument("page")
+    p.add_argument("workspace", help="workspace id or name")
+    p.add_argument("page", help="page view_id or name")
     p.add_argument("-o", "--output", required=True, help="destination .md file")
     p.set_defaults(func=cmd_export_page)
 
     p = sub.add_parser(
         "export-space", help="Export a space/page subtree to a directory."
     )
-    p.add_argument("workspace")
-    p.add_argument("space")
+    p.add_argument("workspace", help="workspace id or name")
+    p.add_argument("space", help="space view_id or name")
     p.add_argument("-o", "--output", required=True, help="destination directory")
     p.set_defaults(func=cmd_export_space)
 
     p = sub.add_parser(
         "export-workspace", help="Export every space in a workspace to a directory."
     )
-    p.add_argument("workspace")
+    p.add_argument("workspace", help="workspace id or name")
     p.add_argument("-o", "--output", required=True, help="destination directory")
     p.set_defaults(func=cmd_export_workspace)
 
     p = sub.add_parser("import-file", help="Import a Markdown file as a page.")
-    p.add_argument("workspace")
-    p.add_argument("parent", help="parent space or page view_id")
+    p.add_argument("workspace", help="workspace id or name")
+    p.add_argument("parent", help="parent space or page (view_id or name)")
     p.add_argument("file")
     p.add_argument("--title")
     p.add_argument("--no-assets", action="store_true",
@@ -330,8 +386,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser(
         "import-dir", help="Recursively import a directory of Markdown files."
     )
-    p.add_argument("workspace")
-    p.add_argument("parent", help="parent space or page view_id")
+    p.add_argument("workspace", help="workspace id or name")
+    p.add_argument("parent", help="parent space or page (view_id or name)")
     p.add_argument("directory")
     p.add_argument("--no-assets", action="store_true",
                    help="keep local image paths instead of uploading them")
@@ -340,8 +396,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser(
         "save", help="Create a page from Markdown (a file, --content, or stdin)."
     )
-    p.add_argument("workspace")
-    p.add_argument("parent", help="parent space or page view_id")
+    p.add_argument("workspace", help="workspace id or name")
+    p.add_argument("parent", help="parent space or page (view_id or name)")
     p.add_argument("title")
     p.add_argument("--file", help="Markdown file to use as content")
     p.add_argument("--content", help="inline Markdown content")
@@ -370,6 +426,7 @@ def main() -> None:
 
         refresh_before = client.token_store.get_refresh_token()
         try:
+            resolve_args(args)
             args.func(args)
         finally:
             # GoTrue rotates refresh tokens; persist the new one or the

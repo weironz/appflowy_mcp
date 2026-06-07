@@ -345,8 +345,10 @@ class AppFlowyClient:
         try:
             body = response.json()
         except Exception as e:
+            snippet = response.text.strip()[:200]
             raise Exception(
-                f"Failed to parse response body: HTTP {response.status_code}"
+                f"HTTP {response.status_code}"
+                + (f": {snippet}" if snippet else " (empty non-JSON body)")
             ) from e
 
         if response.status_code >= 400:
