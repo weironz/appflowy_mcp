@@ -1,11 +1,11 @@
 [project]
 name = "appflowy-cli"
-version = "0.5.0"
+version = "0.6.0"
 description = "Command-line client for AppFlowy: export, import, search, and manage workspaces"
 readme = "README.md"
 requires-python = ">=3.14,<3.15"
 dependencies = [
-    "appflowy-mcp>=0.5.0",
+    "appflowy-mcp>=0.6.0",
 ]
 
 [project.scripts]

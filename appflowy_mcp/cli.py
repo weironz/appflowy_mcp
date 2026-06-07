@@ -6,6 +6,11 @@ at scriptable workflows (backups via cron, bulk import, quick lookups).
 Authentication, in priority order:
 1. APPFLOWY_EMAIL / APPFLOWY_PASSWORD environment variables (or .env)
 2. tokens saved by `appflowy-cli login` in ~/.config/appflowy-cli/
+
+Addressing follows AppFlowy's hierarchy. The workspace comes from
+`appflowy-cli use <workspace>` (saved as the default) or the global
+`-w/--workspace` flag; everything below it is a PATH of space/page
+segments — names or UUIDs — resolved level by level, e.g. `demo/notes`.
 """
 import argparse
 import getpass
@@ -26,13 +31,22 @@ from .server import (
     fetch_page_markdown,
     response_data,
     unique_path,
-    walk_views,
 )
 
 
-def credentials_path() -> Path:
+# ==================== config & credentials ====================
+
+def config_dir() -> Path:
     base = os.environ.get("XDG_CONFIG_HOME", "~/.config")
-    return Path(base).expanduser() / "appflowy-cli" / "credentials.json"
+    return Path(base).expanduser() / "appflowy-cli"
+
+
+def credentials_path() -> Path:
+    return config_dir() / "credentials.json"
+
+
+def config_path() -> Path:
+    return config_dir() / "config.json"
 
 
 def save_credentials() -> None:
@@ -73,6 +87,106 @@ def load_credentials() -> bool:
     return True
 
 
+def load_config() -> dict:
+    try:
+        return json.loads(config_path().read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def save_config(config: dict) -> None:
+    config_path().parent.mkdir(parents=True, exist_ok=True)
+    config_path().write_text(json.dumps(config, indent=2), encoding="utf-8")
+
+
+# ==================== addressing ====================
+
+UUID_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+
+
+def resolve_workspace(token: str) -> dict:
+    """Accept a workspace id or name; return {workspace_id, workspace_name}."""
+    workspaces = response_data(client._request("GET", "/api/workspace"))
+    if UUID_RE.match(token):
+        for ws in workspaces:
+            if ws.get("workspace_id") == token:
+                return ws
+        return {"workspace_id": token, "workspace_name": token}
+    matches = [
+        ws for ws in workspaces
+        if (ws.get("workspace_name") or "").casefold() == token.casefold()
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    names = ", ".join(sorted(ws.get("workspace_name", "?") for ws in workspaces))
+    kind = "Ambiguous" if matches else "Unknown"
+    raise Exception(f"{kind} workspace '{token}'. Available: {names}")
+
+
+def current_workspace(args) -> str:
+    """Workspace id from -w/--workspace, falling back to `use` default."""
+    token = args.workspace or load_config().get("workspace")
+    if not token:
+        raise Exception(
+            "No workspace selected. Run `appflowy-cli use <workspace>` "
+            "or pass -w <workspace>."
+        )
+    return resolve_workspace(token)["workspace_id"]
+
+
+def resolve_path(workspace_id: str, path: str | None) -> dict:
+    """Walk PATH segment by segment from the workspace root.
+
+    Each segment is a child name or view_id; returns the resolved view
+    node (the workspace root view when PATH is empty).
+    """
+    body = client._request(
+        "GET", f"/api/workspace/{workspace_id}/folder", params={"depth": 10}
+    )
+    node = response_data(body)
+    for segment in [s for s in (path or "").split("/") if s]:
+        children = node.get("children") or []
+        matches = [c for c in children if c.get("view_id") == segment] or [
+            c for c in children
+            if (c.get("name") or "").casefold() == segment.casefold()
+        ]
+        if len(matches) == 1:
+            node = matches[0]
+            continue
+        where = node.get("name") or "workspace root"
+        if matches:
+            listing = ", ".join(f"{c['name']} ({c['view_id']})" for c in matches)
+            raise Exception(
+                f"Ambiguous segment '{segment}' under {where} — use a "
+                f"view_id: {listing}"
+            )
+        available = ", ".join(c.get("name", "?") for c in children) or "(none)"
+        raise Exception(
+            f"No '{segment}' under {where}. Children: {available}"
+        )
+    return node
+
+
+# ==================== commands ====================
+
+def emit(args, data, human):
+    if args.json:
+        print(json.dumps(data, indent=2, ensure_ascii=False))
+    else:
+        human(data)
+
+
+def view_marker(view: dict) -> str:
+    if view.get("is_space"):
+        return "space"
+    return {0: "page", 1: "grid", 2: "board", 3: "calendar", 4: "chat"}.get(
+        view.get("layout", 0), f"layout{view.get('layout')}"
+    )
+
+
 def cmd_login(args):
     email = args.email or input("Email: ")
     password = args.password or getpass.getpass("Password: ")
@@ -93,117 +207,68 @@ def cmd_logout(args):
         print("No saved credentials.")
 
 
-def emit(args, data, human):
-    if args.json:
-        print(json.dumps(data, indent=2, ensure_ascii=False))
-    else:
-        human(data)
-
-
-UUID_RE = re.compile(
-    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
-    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
-)
-
-
-def resolve_workspace(token: str) -> str:
-    """Accept a workspace id or name; resolve names to ids."""
-    if UUID_RE.match(token):
-        return token
-    workspaces = response_data(client._request("GET", "/api/workspace"))
-    matches = [
-        ws for ws in workspaces
-        if (ws.get("workspace_name") or "").casefold() == token.casefold()
-    ]
-    if len(matches) == 1:
-        return matches[0]["workspace_id"]
-    names = ", ".join(sorted(ws.get("workspace_name", "?") for ws in workspaces))
-    kind = "Ambiguous" if matches else "Unknown"
-    raise Exception(f"{kind} workspace '{token}'. Available: {names}")
-
-
-def resolve_view(workspace_id: str, token: str) -> str:
-    """Accept a view id or name; resolve names by walking the folder tree."""
-    if UUID_RE.match(token):
-        return token
-    body = client._request(
-        "GET", f"/api/workspace/{workspace_id}/folder", params={"depth": 10}
+def cmd_use(args):
+    config = load_config()
+    if not args.target:
+        current = config.get("workspace")
+        print(current or "(no default workspace; run `appflowy-cli use <workspace>`)")
+        return
+    workspace = resolve_workspace(args.target)
+    config["workspace"] = workspace["workspace_name"]
+    save_config(config)
+    print(
+        f"Default workspace: {workspace['workspace_name']} "
+        f"({workspace['workspace_id']})"
     )
-    views = list(walk_views(response_data(body)))
-    matches = [
-        v for v in views if (v.get("name") or "").casefold() == token.casefold()
-    ]
-    if len(matches) == 1:
-        return matches[0]["view_id"]
-    if matches:
-        listing = ", ".join(f"{v.get('name')} ({v.get('view_id')})" for v in matches)
-        raise Exception(
-            f"Ambiguous view name '{token}' — pass a view_id instead: {listing}"
-        )
-    raise Exception(
-        f"No space or page named '{token}' in this workspace. "
-        "Run `appflowy-cli folder <workspace>` to list views."
-    )
-
-
-def resolve_args(args) -> None:
-    if getattr(args, "workspace", None):
-        args.workspace = resolve_workspace(args.workspace)
-        for attr in ("space", "page", "parent", "root"):
-            value = getattr(args, attr, None)
-            if value:
-                setattr(args, attr, resolve_view(args.workspace, value))
 
 
 def cmd_workspaces(args):
-    body = client._request("GET", "/api/workspace")
-    workspaces = response_data(body)
+    workspaces = response_data(client._request("GET", "/api/workspace"))
+    default = load_config().get("workspace")
 
     def human(data):
         for ws in data:
-            print(f"{ws.get('workspace_id')}  {ws.get('workspace_name')}")
+            star = "*" if ws.get("workspace_name") == default else " "
+            print(f"{star} {ws.get('workspace_id')}  {ws.get('workspace_name')}")
 
     emit(args, workspaces, human)
 
 
-def cmd_spaces(args):
-    body = client._request(
-        "GET", f"/api/workspace/{args.workspace}/folder", params={"depth": 2}
-    )
-    spaces = [v for v in walk_views(response_data(body)) if v.get("is_space")]
+def cmd_ls(args):
+    workspace_id = current_workspace(args)
+    node = resolve_path(workspace_id, args.path)
+    children = node.get("children") or []
 
     def human(data):
-        for space in data:
-            print(f"{space.get('view_id')}  {space.get('name')}")
+        if not data:
+            print("(empty)")
+        for child in data:
+            print(f"{view_marker(child):8} {child.get('view_id')}  {child.get('name')}")
 
-    emit(args, spaces, human)
+    emit(args, children, human)
 
 
-def cmd_folder(args):
-    params = {"depth": args.depth}
-    if args.root:
-        params["root_view_id"] = args.root
-    body = client._request(
-        "GET", f"/api/workspace/{args.workspace}/folder", params=params
-    )
-    root = response_data(body)
+def cmd_tree(args):
+    workspace_id = current_workspace(args)
+    node = resolve_path(workspace_id, args.path)
 
     def human(data):
-        def tree(view, indent):
-            marker = "[space] " if view.get("is_space") else ""
-            print(f"{'  ' * indent}{marker}{view.get('name')}  ({view.get('view_id')})")
+        def walk(view, indent):
+            print(f"{'  ' * indent}[{view_marker(view)}] {view.get('name')}  "
+                  f"({view.get('view_id')})")
             for child in view.get("children") or []:
-                tree(child, indent + 1)
+                walk(child, indent + 1)
 
-        tree(data, 0)
+        walk(data, 0)
 
-    emit(args, root, human)
+    emit(args, node, human)
 
 
 def cmd_search(args):
+    workspace_id = current_workspace(args)
     body = client._request(
         "GET",
-        f"/api/search/{args.workspace}",
+        f"/api/search/{workspace_id}",
         params={"query": args.query, "limit": args.limit},
     )
     hits = response_data(body)
@@ -217,62 +282,74 @@ def cmd_search(args):
     emit(args, hits, human)
 
 
-def cmd_export_page(args):
-    body = client._request(
-        "GET", f"/api/workspace/{args.workspace}/page-view/{args.page}"
-    )
-    page = response_data(body)
-    name = page.get("view", {}).get("name") or args.page
-    markdown = fetch_page_markdown(args.workspace, args.page, title=name)
+def cmd_export(args):
+    workspace_id = current_workspace(args)
+    node = resolve_path(workspace_id, args.path)
+    is_root = not (args.path or "").strip("/")
+    is_tree = is_root or node.get("is_space") or (node.get("children") or [])
 
+    if is_tree:
+        directory = Path(args.output).expanduser()
+        if directory.exists() and any(directory.iterdir()):
+            raise Exception(f"Destination directory is not empty: {directory}")
+        directory.mkdir(parents=True, exist_ok=True)
+
+        exported: list[str] = []
+        warnings: list[str] = []
+        roots = node.get("children") or [] if is_root else [node]
+        export_views_to_directory(workspace_id, roots, directory, exported, warnings)
+        result = {
+            "path": str(directory),
+            "exported_files": exported,
+            "warnings": warnings,
+        }
+
+        def human(data):
+            for file in data["exported_files"]:
+                print(file)
+            for warning in data["warnings"]:
+                print(f"warning: {warning}", file=sys.stderr)
+            print(f"{len(data['exported_files'])} files -> {data['path']}")
+
+        emit(args, result, human)
+        return
+
+    # Leaf page -> a single Markdown file.
+    name = node.get("name") or node["view_id"]
+    markdown = fetch_page_markdown(workspace_id, node["view_id"], title=name)
     path = Path(args.output).expanduser()
-    if path.suffix.lower() not in {".md", ".markdown"}:
+    if path.is_dir():
+        path = path / f"{name}.md"
+    elif path.suffix.lower() not in {".md", ".markdown"}:
         path = path.with_name(path.name + ".md")
     path.parent.mkdir(parents=True, exist_ok=True)
     path = unique_path(path)
     path.write_text(markdown, encoding="utf-8")
-    emit(args, {"page_id": args.page, "name": name, "path": str(path)},
+    emit(args, {"page_id": node["view_id"], "name": name, "path": str(path)},
          lambda d: print(d["path"]))
 
 
-def export_tree(args, root_views):
-    directory = Path(args.output).expanduser()
-    if directory.exists() and any(directory.iterdir()):
-        raise Exception(f"Destination directory is not empty: {directory}")
-    directory.mkdir(parents=True, exist_ok=True)
+def cmd_import(args):
+    workspace_id = current_workspace(args)
+    node = resolve_path(workspace_id, args.path)
+    if not (args.path or "").strip("/"):
+        raise Exception(
+            "Import needs a space or page as PATH; importing directly under "
+            "the workspace root would create spaces. Run `appflowy-cli ls` "
+            "and pick a space."
+        )
+    local = Path(args.local).expanduser()
+    importer = MarkdownImporter(client, workspace_id)
+    if local.is_dir():
+        summary = importer.import_directory(
+            str(local), node["view_id"], upload_assets=not args.no_assets
+        )
+    else:
+        summary = importer.import_file(
+            str(local), node["view_id"],
+            title=args.title, upload_assets=not args.no_assets,
+        )
 
-    exported: list[str] = []
-    warnings: list[str] = []
-    export_views_to_directory(args.workspace, root_views, directory, exported, warnings)
-    result = {"path": str(directory), "exported_files": exported, "warnings": warnings}
-
-    def human(data):
-        for file in data["exported_files"]:
-            print(file)
-        for warning in data["warnings"]:
-            print(f"warning: {warning}", file=sys.stderr)
-        print(f"{len(data['exported_files'])} files -> {data['path']}")
-
-    emit(args, result, human)
-
-
-def cmd_export_space(args):
-    body = client._request(
-        "GET",
-        f"/api/workspace/{args.workspace}/folder",
-        params={"depth": 10, "root_view_id": args.space},
-    )
-    export_tree(args, [response_data(body)])
-
-
-def cmd_export_workspace(args):
-    body = client._request(
-        "GET", f"/api/workspace/{args.workspace}/folder", params={"depth": 10}
-    )
-    export_tree(args, response_data(body).get("children") or [])
-
-
-def import_summary(args, summary):
     def human(data):
         for page in data.get("created_pages", []):
             print(f"{page.get('view_id')}  {page.get('title')}")
@@ -283,41 +360,42 @@ def import_summary(args, summary):
     emit(args, summary, human)
 
 
-def cmd_import_file(args):
-    importer = MarkdownImporter(client, args.workspace)
-    summary = importer.import_file(
-        args.file, args.parent, title=args.title, upload_assets=not args.no_assets
-    )
-    import_summary(args, summary)
-
-
-def cmd_import_dir(args):
-    importer = MarkdownImporter(client, args.workspace)
-    summary = importer.import_directory(
-        args.directory, args.parent, upload_assets=not args.no_assets
-    )
-    import_summary(args, summary)
-
-
 def cmd_save(args):
+    workspace_id = current_workspace(args)
+    node = resolve_path(workspace_id, args.path)
+    if not (args.path or "").strip("/"):
+        raise Exception(
+            "Save needs a space or page as PATH; a page created directly "
+            "under the workspace root would become a space."
+        )
     if args.file:
         content = Path(args.file).expanduser().read_text(encoding="utf-8")
     else:
         content = args.content if args.content is not None else sys.stdin.read()
     blocks = parse_content_to_blocks(content, "markdown")
-    page = create_page_with_blocks(args.workspace, args.parent, args.title, blocks)
+    page = create_page_with_blocks(workspace_id, node["view_id"], args.title, blocks)
     emit(args, page, lambda d: print(d.get("view_id", d)))
 
 
+# ==================== entry point ====================
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="appflowy", description="AppFlowy command-line client."
+        prog="appflowy-cli",
+        description=(
+            "AppFlowy command-line client. Select a workspace once with "
+            "`use`, then address spaces and pages by PATH, e.g. `demo/notes`."
+        ),
     )
     parser.add_argument(
         "--version", action="version", version=version("appflowy-mcp")
     )
     parser.add_argument(
         "--json", action="store_true", help="Print raw JSON instead of summaries."
+    )
+    parser.add_argument(
+        "-w", "--workspace",
+        help="workspace id or name (overrides the `use` default)",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -334,70 +412,54 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("logout", help="Delete saved session tokens.")
     p.set_defaults(func=cmd_logout, auth=False)
 
-    p = sub.add_parser("workspaces", help="List workspaces.")
+    p = sub.add_parser("use", help="Set (or show) the default workspace.")
+    p.add_argument("target", nargs="?", help="workspace id or name")
+    p.set_defaults(func=cmd_use)
+
+    p = sub.add_parser("workspaces", help="List workspaces (* = default).")
     p.set_defaults(func=cmd_workspaces)
 
-    p = sub.add_parser("spaces", help="List spaces in a workspace.")
-    p.add_argument("workspace", help="workspace id or name")
-    p.set_defaults(func=cmd_spaces)
+    p = sub.add_parser("ls", help="List children of a space/page PATH.")
+    p.add_argument("path", nargs="?", help="e.g. demo or demo/notes (default: root)")
+    p.set_defaults(func=cmd_ls)
 
-    p = sub.add_parser("folder", help="Print the folder tree of a workspace.")
-    p.add_argument("workspace", help="workspace id or name")
-    p.add_argument("--depth", type=int, default=10)
-    p.add_argument("--root", help="root view_id to expand (default: workspace root)")
-    p.set_defaults(func=cmd_folder)
+    p = sub.add_parser("tree", help="Print the view tree under PATH.")
+    p.add_argument("path", nargs="?", help="space/page path (default: root)")
+    p.set_defaults(func=cmd_tree)
 
-    p = sub.add_parser("search", help="Full-text search a workspace.")
-    p.add_argument("workspace", help="workspace id or name")
+    p = sub.add_parser("search", help="Full-text search the workspace.")
     p.add_argument("query")
     p.add_argument("--limit", type=int, default=10)
     p.set_defaults(func=cmd_search)
 
-    p = sub.add_parser("export-page", help="Export one page to a Markdown file.")
-    p.add_argument("workspace", help="workspace id or name")
-    p.add_argument("page", help="page view_id or name")
-    p.add_argument("-o", "--output", required=True, help="destination .md file")
-    p.set_defaults(func=cmd_export_page)
+    p = sub.add_parser(
+        "export",
+        help="Export PATH as Markdown: a leaf page becomes one .md file, "
+        "a space/subtree becomes a directory, no PATH exports the whole "
+        "workspace.",
+    )
+    p.add_argument("path", nargs="?", help="space/page path (default: whole workspace)")
+    p.add_argument("-o", "--output", required=True,
+                   help="destination file or directory")
+    p.set_defaults(func=cmd_export)
 
     p = sub.add_parser(
-        "export-space", help="Export a space/page subtree to a directory."
+        "import",
+        help="Import local Markdown under PATH: a local file becomes one "
+        "page, a local directory becomes a page subtree.",
     )
-    p.add_argument("workspace", help="workspace id or name")
-    p.add_argument("space", help="space view_id or name")
-    p.add_argument("-o", "--output", required=True, help="destination directory")
-    p.set_defaults(func=cmd_export_space)
-
-    p = sub.add_parser(
-        "export-workspace", help="Export every space in a workspace to a directory."
-    )
-    p.add_argument("workspace", help="workspace id or name")
-    p.add_argument("-o", "--output", required=True, help="destination directory")
-    p.set_defaults(func=cmd_export_workspace)
-
-    p = sub.add_parser("import-file", help="Import a Markdown file as a page.")
-    p.add_argument("workspace", help="workspace id or name")
-    p.add_argument("parent", help="parent space or page (view_id or name)")
-    p.add_argument("file")
-    p.add_argument("--title")
+    p.add_argument("path", help="destination space/page path")
+    p.add_argument("local", help="local .md file or directory")
+    p.add_argument("--title", help="page title for single-file import")
     p.add_argument("--no-assets", action="store_true",
                    help="keep local image paths instead of uploading them")
-    p.set_defaults(func=cmd_import_file)
+    p.set_defaults(func=cmd_import)
 
     p = sub.add_parser(
-        "import-dir", help="Recursively import a directory of Markdown files."
+        "save", help="Create a page under PATH from Markdown "
+        "(a file, --content, or stdin)."
     )
-    p.add_argument("workspace", help="workspace id or name")
-    p.add_argument("parent", help="parent space or page (view_id or name)")
-    p.add_argument("directory")
-    p.add_argument("--no-assets", action="store_true",
-                   help="keep local image paths instead of uploading them")
-    p.set_defaults(func=cmd_import_dir)
-
-    p = sub.add_parser(
-        "save", help="Create a page from Markdown (a file, --content, or stdin)."
-    )
-    p.add_argument("workspace", help="workspace id or name")
-    p.add_argument("parent", help="parent space or page (view_id or name)")
+    p.add_argument("path", help="parent space/page path")
     p.add_argument("title")
     p.add_argument("--file", help="Markdown file to use as content")
     p.add_argument("--content", help="inline Markdown content")
@@ -426,7 +488,6 @@ def main() -> None:
 
         refresh_before = client.token_store.get_refresh_token()
         try:
-            resolve_args(args)
             args.func(args)
         finally:
             # GoTrue rotates refresh tokens; persist the new one or the

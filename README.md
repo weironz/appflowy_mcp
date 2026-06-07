@@ -305,7 +305,9 @@ Create a chat with `appflowy_create_chat` (optionally passing `rag_ids`, page vi
 
 ## Command-Line Interface
 
-A standalone [`appflowy-cli`](https://pypi.org/project/appflowy-cli/) package (a thin wrapper around this one) exposes the same client as a CLI, aimed at scriptable workflows — backups via cron, bulk import, quick lookups. Authenticate either with the same `APPFLOWY_EMAIL` / `APPFLOWY_PASSWORD` / `APPFLOWY_BASE_URL` environment variables (or a `.env` file), or interactively:
+A standalone [`appflowy-cli`](https://pypi.org/project/appflowy-cli/) package (a thin wrapper around this one) exposes the same client as a CLI, aimed at scriptable workflows — backups via cron, bulk import, quick lookups.
+
+Authenticate either with the same `APPFLOWY_EMAIL` / `APPFLOWY_PASSWORD` / `APPFLOWY_BASE_URL` environment variables (or a `.env` file), or interactively:
 
 ```bash
 uvx appflowy-cli login          # prompts for email/password
@@ -314,28 +316,33 @@ uvx appflowy-cli logout
 
 `login` saves the session tokens (never the password) to `~/.config/appflowy-cli/credentials.json` with mode 600 and keeps them fresh across runs; environment variables take priority when both are set.
 
+Addressing follows AppFlowy's hierarchy: pick a workspace once with `use` (or per-command with `-w`), then address spaces and pages by PATH — `/`-separated names or UUIDs resolved level by level:
+
 ```bash
-# look around
-uvx appflowy-cli workspaces
-uvx appflowy-cli spaces <workspace-id>
-uvx appflowy-cli folder <workspace-id> --depth 2
-uvx appflowy-cli search <workspace-id> "query"
+appflowy-cli use test                  # set the default workspace
+appflowy-cli workspaces                # list workspaces (* = default)
+appflowy-cli ls                        # spaces at the workspace root
+appflowy-cli ls demo                   # children of the demo space
+appflowy-cli tree demo                 # full subtree
+appflowy-cli search "query"
 
 # export (Markdown, inline formatting preserved)
-uvx appflowy-cli export-page <workspace-id> <page-id> -o note.md
-uvx appflowy-cli export-space <workspace-id> <space-id> -o ./backup
-uvx appflowy-cli export-workspace <workspace-id> -o ./backup
+appflowy-cli export demo/notes -o note.md   # leaf page -> one .md file
+appflowy-cli export demo -o ./demo          # space -> directory tree
+appflowy-cli export -o ./backup             # whole workspace
 
 # import / create
-uvx appflowy-cli import-file <workspace-id> <parent-id> note.md
-uvx appflowy-cli import-dir <workspace-id> <parent-id> ./notes
-echo "# Note" | uvx appflowy-cli save <workspace-id> <parent-id> "Title"
+appflowy-cli import demo ./notes            # local dir -> page subtree
+appflowy-cli import demo note.md            # local file -> one page
+echo "# Note" | appflowy-cli save demo "Title"
+
+appflowy-cli -w Programming ls              # one-off workspace override
 ```
 
 Every command accepts `--json` for machine-readable output. A nightly workspace backup is one cron line:
 
 ```cron
-0 3 * * * APPFLOWY_EMAIL=... APPFLOWY_PASSWORD=... uvx appflowy-cli export-workspace <workspace-id> -o ~/backups/appflowy-$(date +\%F)
+0 3 * * * APPFLOWY_EMAIL=... APPFLOWY_PASSWORD=... uvx appflowy-cli -w <workspace> export -o ~/backups/appflowy-$(date +\%F)
 ```
 
 During development, run the CLI from this repository with `uv run python -m appflowy_mcp.cli`.
