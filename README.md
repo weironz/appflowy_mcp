@@ -305,7 +305,14 @@ Create a chat with `appflowy_create_chat` (optionally passing `rag_ids`, page vi
 
 ## Command-Line Interface
 
-A standalone [`appflowy-cli`](https://pypi.org/project/appflowy-cli/) package (a thin wrapper around this one) exposes the same client as a CLI, aimed at scriptable workflows — backups via cron, bulk import, quick lookups. Credentials come from the same `APPFLOWY_EMAIL` / `APPFLOWY_PASSWORD` / `APPFLOWY_BASE_URL` environment variables (or a `.env` file).
+A standalone [`appflowy-cli`](https://pypi.org/project/appflowy-cli/) package (a thin wrapper around this one) exposes the same client as a CLI, aimed at scriptable workflows — backups via cron, bulk import, quick lookups. Authenticate either with the same `APPFLOWY_EMAIL` / `APPFLOWY_PASSWORD` / `APPFLOWY_BASE_URL` environment variables (or a `.env` file), or interactively:
+
+```bash
+uvx appflowy-cli login          # prompts for email/password
+uvx appflowy-cli logout
+```
+
+`login` saves the session tokens (never the password) to `~/.config/appflowy-cli/credentials.json` with mode 600 and keeps them fresh across runs; environment variables take priority when both are set.
 
 ```bash
 # look around

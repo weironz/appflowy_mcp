@@ -8,6 +8,6 @@ uvx appflowy-cli export-workspace <workspace-id> -o ./backup
 echo "# Note" | uvx appflowy-cli save <workspace-id> <parent-id> "Title"
 ```
 
-Credentials via `APPFLOWY_EMAIL` / `APPFLOWY_PASSWORD` / `APPFLOWY_BASE_URL` (or a `.env` file). All commands accept `--json`.
+Authenticate with `uvx appflowy-cli login` (saves session tokens, never the password, to `~/.config/appflowy-cli/`), or via `APPFLOWY_EMAIL` / `APPFLOWY_PASSWORD` / `APPFLOWY_BASE_URL` (or a `.env` file). All commands accept `--json`.
 
 This is a thin wrapper; the implementation lives in [`appflowy-mcp`](https://pypi.org/project/appflowy-mcp/). Full documentation: https://github.com/weironz/appflowy_mcp

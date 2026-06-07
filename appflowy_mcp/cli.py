@@ -2,11 +2,15 @@
 
 A thin layer over the same client/converters the MCP server uses, aimed
 at scriptable workflows (backups via cron, bulk import, quick lookups).
-Credentials come from APPFLOWY_EMAIL / APPFLOWY_PASSWORD / APPFLOWY_BASE_URL
-(environment or a local .env file).
+
+Authentication, in priority order:
+1. APPFLOWY_EMAIL / APPFLOWY_PASSWORD environment variables (or .env)
+2. tokens saved by `appflowy-cli login` in ~/.config/appflowy-cli/
 """
 import argparse
+import getpass
 import json
+import os
 import sys
 from importlib.metadata import version
 from pathlib import Path
@@ -23,6 +27,69 @@ from .server import (
     unique_path,
     walk_views,
 )
+
+
+def credentials_path() -> Path:
+    base = os.environ.get("XDG_CONFIG_HOME", "~/.config")
+    return Path(base).expanduser() / "appflowy-cli" / "credentials.json"
+
+
+def save_credentials() -> None:
+    """Persist the session tokens (never the password) with mode 600."""
+    path = credentials_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "email": client.email,
+                "base_url": client.base_url,
+                "access_token": client.token_store.get_access_token(),
+                "refresh_token": client.token_store.get_refresh_token(),
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    path.chmod(0o600)
+
+
+def load_credentials() -> bool:
+    """Restore a saved session into the client. Returns True if loaded."""
+    path = credentials_path()
+    if not path.is_file():
+        return False
+    try:
+        stored = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    if not stored.get("refresh_token"):
+        return False
+    client.email = client.email or stored.get("email")
+    if stored.get("base_url") and not os.getenv("APPFLOWY_BASE_URL"):
+        client.base_url = stored["base_url"]
+    client.token_store.set_access_token(stored.get("access_token"))
+    client.token_store.set_refresh_token(stored["refresh_token"])
+    return True
+
+
+def cmd_login(args):
+    email = args.email or input("Email: ")
+    password = args.password or getpass.getpass("Password: ")
+    if args.base_url:
+        client.base_url = args.base_url.rstrip("/")
+    client.email, client.password = email, password
+    client.login()
+    save_credentials()
+    print(f"Logged in as {email}. Tokens saved to {credentials_path()}")
+
+
+def cmd_logout(args):
+    path = credentials_path()
+    if path.is_file():
+        path.unlink()
+        print(f"Removed {path}")
+    else:
+        print("No saved credentials.")
 
 
 def emit(args, data, human):
@@ -198,6 +265,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
+    p = sub.add_parser(
+        "login",
+        help="Log in and save session tokens for later commands "
+        "(the password itself is never stored).",
+    )
+    p.add_argument("--email", help="prompted for interactively if omitted")
+    p.add_argument("--password", help="prompted for interactively if omitted")
+    p.add_argument("--base-url", help="self-hosted AppFlowy Cloud URL")
+    p.set_defaults(func=cmd_login, auth=False)
+
+    p = sub.add_parser("logout", help="Delete saved session tokens.")
+    p.set_defaults(func=cmd_logout, auth=False)
+
     p = sub.add_parser("workspaces", help="List workspaces.")
     p.set_defaults(func=cmd_workspaces)
 
@@ -273,8 +353,29 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     args = build_parser().parse_args()
     try:
-        ensure_authenticated()
-        args.func(args)
+        if not getattr(args, "auth", True):
+            args.func(args)
+            return
+
+        stored = False
+        if client.email and client.password:
+            ensure_authenticated()
+        elif load_credentials():
+            stored = True
+        else:
+            raise Exception(
+                "Not authenticated. Run `appflowy-cli login`, or set "
+                "APPFLOWY_EMAIL and APPFLOWY_PASSWORD."
+            )
+
+        refresh_before = client.token_store.get_refresh_token()
+        try:
+            args.func(args)
+        finally:
+            # GoTrue rotates refresh tokens; persist the new one or the
+            # next run's refresh would fail.
+            if stored and client.token_store.get_refresh_token() != refresh_before:
+                save_credentials()
     except Exception as e:
         print(f"error: {e}", file=sys.stderr)
         sys.exit(1)
