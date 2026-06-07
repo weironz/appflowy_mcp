@@ -8,53 +8,56 @@ An MCP server for AppFlowy with 68 tools covering workspaces, spaces, pages, pag
 - uv
 - AppFlowy account credentials
 
-## Configure In Codex
+## Installation
 
-```
-codex mcp add appflowy -- uvx appflowy-mcp --env APPFLOWY_EMAIL="your-email" --env APPFLOWY_PASSWORD="your-password" 
-```
+The package is published on PyPI as [`appflowy-mcp`](https://pypi.org/project/appflowy-mcp/), so all clients can run it with `uvx appflowy-mcp`. Pick your client below.
 
-### Option 1: PyPI / uvx
+### Claude Code
 
-
-
-Use this after the package is published to PyPI. This is the simplest setup for daily use.
-
-Use `uvx` as the command:
-
-```text
-uvx
+```bash
+claude mcp add appflowy \
+  -e APPFLOWY_EMAIL=your-email \
+  -e APPFLOWY_PASSWORD=your-password \
+  -- uvx appflowy-mcp
 ```
 
-Use these arguments:
+### Codex
 
-```text
-appflowy-mcp
+```bash
+codex mcp add appflowy \
+  --env APPFLOWY_EMAIL=your-email \
+  --env APPFLOWY_PASSWORD=your-password \
+  -- uvx appflowy-mcp
 ```
 
-### Option 2: Local Source / uv
+### Other MCP Clients
 
-Use this when developing the MCP locally or running directly from a cloned repository.
+Any client that supports stdio MCP servers can use this JSON config (Claude Desktop, Cursor, Windsurf, etc.):
 
-Use `uv` as the command:
-
-```text
-uv
+```json
+{
+  "mcpServers": {
+    "appflowy": {
+      "command": "uvx",
+      "args": ["appflowy-mcp"],
+      "env": {
+        "APPFLOWY_EMAIL": "your-email",
+        "APPFLOWY_PASSWORD": "your-password"
+      }
+    }
+  }
+}
 ```
 
-Use these arguments:
+### Local Source (Development)
 
-```text
-run
---project
-D:\codes\MCP\Appflowy-MCP
-D:\codes\MCP\Appflowy-MCP\main.py
-```
+When developing from a cloned repository, replace `uvx appflowy-mcp` with `uv run` against your checkout. For example with Claude Code:
 
-## Configure In Claude-code
-
-```
-claude mcp add appflowy -- uvx appflowy -e APPFLOWY_EMAIL=your-email -e APPFLOWY_PASSWORD=your-password
+```bash
+claude mcp add appflowy \
+  -e APPFLOWY_EMAIL=your-email \
+  -e APPFLOWY_PASSWORD=your-password \
+  -- uv run --project /path/to/appflowy_mcp appflowy-mcp
 ```
 
 ## Environment Variables
