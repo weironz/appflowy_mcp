@@ -1,4 +1,7 @@
+import mimetypes
 import os
+import uuid
+from pathlib import Path
 
 from fastmcp import FastMCP
 
@@ -24,6 +27,19 @@ from .models import (
     ImportMarkdownDirectoryRequest,
     ImportMarkdownFileRequest,
     SavePageRequest,
+    CreateWorkspaceRequest,
+    UpdateWorkspaceRequest,
+    UpdateWorkspaceSettingsRequest,
+    UpdateMemberRequest,
+    InviteMembersRequest,
+    DuplicatePageRequest,
+    PublishPageRequest,
+    CreateQuickNoteRequest,
+    UpdateQuickNoteRequest,
+    CreateDatabaseFieldRequest,
+    UploadFileRequest,
+    CreateChatRequest,
+    UpdateChatSettingsRequest,
 )
 from dotenv import load_dotenv
 
@@ -732,6 +748,779 @@ def appflowy_import_markdown_directory(
         )
     except Exception as e:
         raise Exception(f"Failed to import markdown directory: {str(e)}")
+
+
+# ==================== SEARCH TOOLS ====================
+
+@mcp.tool(
+    name="appflowy_search",
+    description=(
+        "Search documents in a workspace by keyword or natural-language query "
+        "(full-text plus semantic search when the server has indexing enabled). "
+        "Returns matching documents with object_id (the page view_id), preview, and score."
+    ),
+)
+def appflowy_search(
+    workspace_id: str, query: str, limit: int = 10, preview_size: int = 180
+):
+    """Search workspace documents."""
+    ensure_authenticated()
+
+    try:
+        body = client._request(
+            "GET",
+            f"/api/search/{workspace_id}",
+            params={"query": query, "limit": limit, "preview_size": preview_size},
+        )
+        return response_data(body)
+    except Exception as e:
+        raise Exception(f"Failed to search workspace: {str(e)}")
+
+
+# ==================== WORKSPACE MANAGEMENT TOOLS ====================
+
+@mcp.tool(name="appflowy_create_workspace", description="Create a new workspace.")
+def appflowy_create_workspace(request: CreateWorkspaceRequest):
+    """Create a new AppFlowy workspace."""
+    ensure_authenticated()
+
+    try:
+        body = client._request(
+            "POST", "/api/workspace", json_body=request.model_dump(exclude_none=True)
+        )
+        return response_data(body)
+    except Exception as e:
+        raise Exception(f"Failed to create workspace: {str(e)}")
+
+
+@mcp.tool(
+    name="appflowy_update_workspace",
+    description="Update a workspace name and/or icon.",
+)
+def appflowy_update_workspace(workspace_id: str, request: UpdateWorkspaceRequest):
+    """Update an AppFlowy workspace."""
+    ensure_authenticated()
+
+    try:
+        payload = {"workspace_id": workspace_id, **request.model_dump(exclude_none=True)}
+        client._request("PATCH", "/api/workspace", json_body=payload)
+        return {"status": "updated"}
+    except Exception as e:
+        raise Exception(f"Failed to update workspace: {str(e)}")
+
+
+@mcp.tool(
+    name="appflowy_delete_workspace",
+    description="Permanently delete a workspace and everything in it. Irreversible.",
+)
+def appflowy_delete_workspace(workspace_id: str):
+    """Delete an AppFlowy workspace."""
+    ensure_authenticated()
+
+    try:
+        client._request("DELETE", f"/api/workspace/{workspace_id}")
+        return {"status": "deleted"}
+    except Exception as e:
+        raise Exception(f"Failed to delete workspace: {str(e)}")
+
+
+@mcp.tool(
+    name="appflowy_leave_workspace",
+    description="Leave a workspace you are a member of.",
+)
+def appflowy_leave_workspace(workspace_id: str):
+    """Leave an AppFlowy workspace."""
+    ensure_authenticated()
+
+    try:
+        # This endpoint expects a literal JSON null body.
+        client._request_content_json(
+            "POST",
+            f"/api/workspace/{workspace_id}/leave",
+            content=b"null",
+            content_type="application/json",
+        )
+        return {"status": "left"}
+    except Exception as e:
+        raise Exception(f"Failed to leave workspace: {str(e)}")
+
+
+@mcp.tool(
+    name="appflowy_get_workspace_settings",
+    description="Get workspace settings (search indexing, AI model).",
+)
+def appflowy_get_workspace_settings(workspace_id: str):
+    """Get AppFlowy workspace settings."""
+    ensure_authenticated()
+
+    try:
+        body = client._request("GET", f"/api/workspace/{workspace_id}/settings")
+        return response_data(body)
+    except Exception as e:
+        raise Exception(f"Failed to get workspace settings: {str(e)}")
+
+
+@mcp.tool(
+    name="appflowy_update_workspace_settings",
+    description="Update workspace settings: disable_search_indexing and/or ai_model.",
+)
+def appflowy_update_workspace_settings(
+    workspace_id: str, request: UpdateWorkspaceSettingsRequest
+):
+    """Update AppFlowy workspace settings."""
+    ensure_authenticated()
+
+    try:
+        body = client._request(
+            "POST",
+            f"/api/workspace/{workspace_id}/settings",
+            json_body=request.model_dump(exclude_none=True),
+        )
+        return response_data(body)
+    except Exception as e:
+        raise Exception(f"Failed to update workspace settings: {str(e)}")
+
+
+@mcp.tool(
+    name="appflowy_get_workspace_usage",
+    description="Get workspace storage usage (consumed capacity in bytes).",
+)
+def appflowy_get_workspace_usage(workspace_id: str):
+    """Get AppFlowy workspace storage usage."""
+    ensure_authenticated()
+
+    try:
+        body = client._request("GET", f"/api/file_storage/{workspace_id}/usage")
+        return response_data(body)
+    except Exception as e:
+        raise Exception(f"Failed to get workspace usage: {str(e)}")
+
+
+# ==================== MEMBER & INVITATION TOOLS ====================
+
+@mcp.tool(
+    name="appflowy_list_members",
+    description="List members of a workspace with their roles.",
+)
+def appflowy_list_members(workspace_id: str):
+    """List AppFlowy workspace members."""
+    ensure_authenticated()
+
+    try:
+        body = client._request("GET", f"/api/workspace/{workspace_id}/member")
+        return response_data(body)
+    except Exception as e:
+        raise Exception(f"Failed to list members: {str(e)}")
+
+
+@mcp.tool(
+    name="appflowy_update_member",
+    description="Update a workspace member's role (Owner, Member, Guest) or name.",
+)
+def appflowy_update_member(workspace_id: str, request: UpdateMemberRequest):
+    """Update an AppFlowy workspace member."""
+    ensure_authenticated()
+
+    try:
+        client._request(
+            "PUT",
+            f"/api/workspace/{workspace_id}/member",
+            json_body=request.model_dump(exclude_none=True),
+        )
+        return {"status": "updated"}
+    except Exception as e:
+        raise Exception(f"Failed to update member: {str(e)}")
+
+
+@mcp.tool(
+    name="appflowy_remove_members",
+    description="Remove members from a workspace by email.",
+)
+def appflowy_remove_members(workspace_id: str, emails: list[str]):
+    """Remove AppFlowy workspace members."""
+    ensure_authenticated()
+
+    if not emails:
+        raise Exception("At least one email is required.")
+    try:
+        client._request(
+            "DELETE", f"/api/workspace/{workspace_id}/member", json_body=emails
+        )
+        return {"status": "removed", "emails": emails}
+    except Exception as e:
+        raise Exception(f"Failed to remove members: {str(e)}")
+
+
+@mcp.tool(
+    name="appflowy_invite_members",
+    description="Invite people to a workspace by email with a role (Owner, Member, Guest).",
+)
+def appflowy_invite_members(workspace_id: str, request: InviteMembersRequest):
+    """Invite members to an AppFlowy workspace."""
+    ensure_authenticated()
+
+    try:
+        invitations = [
+            {
+                "email": email,
+                "role": request.role,
+                "skip_email_send": request.skip_email_send,
+            }
+            for email in request.emails
+        ]
+        client._request(
+            "POST", f"/api/workspace/{workspace_id}/invite", json_body=invitations
+        )
+        return {"status": "invited", "emails": request.emails, "role": request.role}
+    except Exception as e:
+        raise Exception(f"Failed to invite members: {str(e)}")
+
+
+@mcp.tool(
+    name="appflowy_list_invitations",
+    description="List workspace invitations sent to the authenticated user, optionally filtered by status (Pending, Accepted, Rejected).",
+)
+def appflowy_list_invitations(status: str | None = None):
+    """List the authenticated user's AppFlowy workspace invitations."""
+    ensure_authenticated()
+
+    try:
+        params = {"status": status} if status else None
+        body = client._request("GET", "/api/workspace/invite", params=params)
+        return response_data(body)
+    except Exception as e:
+        raise Exception(f"Failed to list invitations: {str(e)}")
+
+
+@mcp.tool(
+    name="appflowy_accept_invitation",
+    description="Accept a workspace invitation by invite_id.",
+)
+def appflowy_accept_invitation(invite_id: str):
+    """Accept an AppFlowy workspace invitation."""
+    ensure_authenticated()
+
+    try:
+        # This endpoint expects a literal JSON null body.
+        client._request_content_json(
+            "POST",
+            f"/api/workspace/accept-invite/{invite_id}",
+            content=b"null",
+            content_type="application/json",
+        )
+        return {"status": "accepted"}
+    except Exception as e:
+        raise Exception(f"Failed to accept invitation: {str(e)}")
+
+
+# ==================== MORE PAGE TOOLS ====================
+
+@mcp.tool(
+    name="appflowy_duplicate_page",
+    description="Duplicate a page and all of its child pages.",
+)
+def appflowy_duplicate_page(
+    workspace_id: str, page_id: str, request: DuplicatePageRequest
+):
+    """Duplicate an AppFlowy page view and its children."""
+    ensure_authenticated()
+
+    try:
+        body = client._request(
+            "POST",
+            f"/api/workspace/{workspace_id}/page-view/{page_id}/duplicate",
+            json_body=request.model_dump(exclude_none=True),
+        )
+        return response_data(body)
+    except Exception as e:
+        raise Exception(f"Failed to duplicate page: {str(e)}")
+
+
+@mcp.tool(
+    name="appflowy_list_recent",
+    description="List recently viewed pages in a workspace.",
+)
+def appflowy_list_recent(workspace_id: str):
+    """List recently viewed AppFlowy pages."""
+    ensure_authenticated()
+
+    try:
+        body = client._request("GET", f"/api/workspace/{workspace_id}/recent")
+        return response_data(body)
+    except Exception as e:
+        raise Exception(f"Failed to list recent pages: {str(e)}")
+
+
+@mcp.tool(
+    name="appflowy_restore_all_from_trash",
+    description="Restore all trashed pages in a workspace.",
+)
+def appflowy_restore_all_from_trash(workspace_id: str):
+    """Restore all AppFlowy pages from trash."""
+    ensure_authenticated()
+
+    try:
+        client._request(
+            "POST",
+            f"/api/workspace/{workspace_id}/restore-all-pages-from-trash",
+            json_body={},
+        )
+        return {"status": "restored_all"}
+    except Exception as e:
+        raise Exception(f"Failed to restore all pages from trash: {str(e)}")
+
+
+@mcp.tool(
+    name="appflowy_empty_trash",
+    description="Permanently delete ALL trashed pages in a workspace. Irreversible.",
+)
+def appflowy_empty_trash(workspace_id: str):
+    """Permanently delete all AppFlowy pages in trash."""
+    ensure_authenticated()
+
+    try:
+        client._request(
+            "POST",
+            f"/api/workspace/{workspace_id}/delete-all-pages-from-trash",
+            json_body={},
+        )
+        return {"status": "emptied"}
+    except Exception as e:
+        raise Exception(f"Failed to empty trash: {str(e)}")
+
+
+# ==================== PUBLISH TOOLS ====================
+
+@mcp.tool(
+    name="appflowy_publish_page",
+    description="Publish a page to the web so anyone with the link can view it.",
+)
+def appflowy_publish_page(workspace_id: str, page_id: str, request: PublishPageRequest):
+    """Publish an AppFlowy page to the web."""
+    ensure_authenticated()
+
+    try:
+        client._request(
+            "POST",
+            f"/api/workspace/{workspace_id}/page-view/{page_id}/publish",
+            json_body=request.model_dump(exclude_none=True),
+        )
+        info = client._request(
+            "GET", f"/api/workspace/v1/published-info/{page_id}"
+        )
+        return response_data(info)
+    except Exception as e:
+        raise Exception(f"Failed to publish page: {str(e)}")
+
+
+@mcp.tool(name="appflowy_unpublish_page", description="Unpublish a page from the web.")
+def appflowy_unpublish_page(workspace_id: str, page_id: str):
+    """Unpublish an AppFlowy page."""
+    ensure_authenticated()
+
+    try:
+        client._request(
+            "POST",
+            f"/api/workspace/{workspace_id}/page-view/{page_id}/unpublish",
+            json_body={},
+        )
+        return {"status": "unpublished"}
+    except Exception as e:
+        raise Exception(f"Failed to unpublish page: {str(e)}")
+
+
+@mcp.tool(
+    name="appflowy_get_publish_namespace",
+    description="Get the workspace publish namespace (the subdomain published pages live under).",
+)
+def appflowy_get_publish_namespace(workspace_id: str):
+    """Get the AppFlowy workspace publish namespace."""
+    ensure_authenticated()
+
+    try:
+        body = client._request(
+            "GET", f"/api/workspace/{workspace_id}/publish-namespace"
+        )
+        return {"namespace": response_data(body)}
+    except Exception as e:
+        raise Exception(f"Failed to get publish namespace: {str(e)}")
+
+
+@mcp.tool(
+    name="appflowy_set_publish_namespace",
+    description="Rename the workspace publish namespace.",
+)
+def appflowy_set_publish_namespace(workspace_id: str, new_namespace: str):
+    """Set the AppFlowy workspace publish namespace."""
+    ensure_authenticated()
+
+    try:
+        current = client._request(
+            "GET", f"/api/workspace/{workspace_id}/publish-namespace"
+        )
+        old_namespace = response_data(current)
+        client._request(
+            "PUT",
+            f"/api/workspace/{workspace_id}/publish-namespace",
+            json_body={
+                "old_namespace": old_namespace,
+                "new_namespace": new_namespace,
+            },
+        )
+        return {"namespace": new_namespace}
+    except Exception as e:
+        raise Exception(f"Failed to set publish namespace: {str(e)}")
+
+
+@mcp.tool(
+    name="appflowy_list_published_views",
+    description="List all published pages in a workspace.",
+)
+def appflowy_list_published_views(workspace_id: str):
+    """List published AppFlowy pages."""
+    ensure_authenticated()
+
+    try:
+        body = client._request("GET", f"/api/workspace/{workspace_id}/published-info")
+        return response_data(body)
+    except Exception as e:
+        # Older deployments (e.g. beta.appflowy.cloud) lack this endpoint;
+        # fall back to walking the folder tree for is_published views.
+        if "404" not in str(e):
+            raise Exception(f"Failed to list published views: {str(e)}")
+
+    try:
+        body = client._request(
+            "GET", f"/api/workspace/{workspace_id}/folder", params={"depth": 10}
+        )
+        root = response_data(body)
+        return [
+            {
+                "view_id": view.get("view_id"),
+                "name": view.get("name"),
+                "layout": view.get("layout"),
+                "publish_name": (view.get("extra") or {}).get("publish_name")
+                if isinstance(view.get("extra"), dict)
+                else None,
+            }
+            for view in walk_views(root)
+            if view.get("is_published")
+        ]
+    except Exception as e:
+        raise Exception(f"Failed to list published views: {str(e)}")
+
+
+# ==================== QUICK NOTE TOOLS ====================
+
+def quick_note_data(text: str | None, data):
+    if data is not None:
+        return data
+    if text is not None:
+        return [
+            {"type": "paragraph", "delta": [{"insert": line}]}
+            for line in text.splitlines() or [""]
+        ]
+    return None
+
+
+@mcp.tool(
+    name="appflowy_list_quick_notes",
+    description="List quick notes in a workspace, with optional search and pagination.",
+)
+def appflowy_list_quick_notes(
+    workspace_id: str,
+    search_term: str | None = None,
+    offset: int | None = None,
+    limit: int | None = None,
+):
+    """List AppFlowy quick notes."""
+    ensure_authenticated()
+
+    try:
+        params = {
+            k: v
+            for k, v in {
+                "search_term": search_term,
+                "offset": offset,
+                "limit": limit,
+            }.items()
+            if v is not None
+        }
+        body = client._request(
+            "GET", f"/api/workspace/{workspace_id}/quick-note", params=params or None
+        )
+        return response_data(body)
+    except Exception as e:
+        raise Exception(f"Failed to list quick notes: {str(e)}")
+
+
+@mcp.tool(
+    name="appflowy_create_quick_note",
+    description="Create a quick note from plain text (or raw block data).",
+)
+def appflowy_create_quick_note(workspace_id: str, request: CreateQuickNoteRequest):
+    """Create an AppFlowy quick note."""
+    ensure_authenticated()
+
+    try:
+        body = client._request(
+            "POST",
+            f"/api/workspace/{workspace_id}/quick-note",
+            json_body={"data": quick_note_data(request.text, request.data)},
+        )
+        return response_data(body)
+    except Exception as e:
+        raise Exception(f"Failed to create quick note: {str(e)}")
+
+
+@mcp.tool(
+    name="appflowy_update_quick_note",
+    description="Replace a quick note's content with plain text (or raw block data).",
+)
+def appflowy_update_quick_note(
+    workspace_id: str, quick_note_id: str, request: UpdateQuickNoteRequest
+):
+    """Update an AppFlowy quick note."""
+    ensure_authenticated()
+
+    data = quick_note_data(request.text, request.data)
+    if data is None:
+        raise Exception("Either text or data is required.")
+    try:
+        client._request(
+            "PUT",
+            f"/api/workspace/{workspace_id}/quick-note/{quick_note_id}",
+            json_body={"data": data},
+        )
+        return {"status": "updated"}
+    except Exception as e:
+        raise Exception(f"Failed to update quick note: {str(e)}")
+
+
+@mcp.tool(name="appflowy_delete_quick_note", description="Delete a quick note.")
+def appflowy_delete_quick_note(workspace_id: str, quick_note_id: str):
+    """Delete an AppFlowy quick note."""
+    ensure_authenticated()
+
+    try:
+        client._request(
+            "DELETE", f"/api/workspace/{workspace_id}/quick-note/{quick_note_id}"
+        )
+        return {"status": "deleted"}
+    except Exception as e:
+        raise Exception(f"Failed to delete quick note: {str(e)}")
+
+
+# ==================== MORE DATABASE TOOLS ====================
+
+@mcp.tool(
+    name="appflowy_create_database_field",
+    description="Add a new field (column) to a database.",
+)
+def appflowy_create_database_field(
+    workspace_id: str, database_id: str, request: CreateDatabaseFieldRequest
+):
+    """Add a field to an AppFlowy database."""
+    ensure_authenticated()
+
+    try:
+        body = client._request(
+            "POST",
+            f"/api/workspace/{workspace_id}/database/{database_id}/fields",
+            json_body=request.model_dump(exclude_none=True),
+        )
+        return response_data(body)
+    except Exception as e:
+        raise Exception(f"Failed to create database field: {str(e)}")
+
+
+# ==================== USER & FILE TOOLS ====================
+
+@mcp.tool(
+    name="appflowy_get_user_profile",
+    description="Get the authenticated user's profile (uid, email, name, latest workspace).",
+)
+def appflowy_get_user_profile():
+    """Get the AppFlowy user profile."""
+    ensure_authenticated()
+
+    try:
+        body = client._request("GET", "/api/user/profile")
+        return response_data(body)
+    except Exception as e:
+        raise Exception(f"Failed to get user profile: {str(e)}")
+
+
+@mcp.tool(
+    name="appflowy_upload_file",
+    description=(
+        "Upload a local file to AppFlowy file storage and return its URL, which can "
+        "be referenced from image or file blocks in pages."
+    ),
+)
+def appflowy_upload_file(workspace_id: str, request: UploadFileRequest):
+    """Upload a local file to AppFlowy file storage."""
+    ensure_authenticated()
+
+    try:
+        path = Path(request.path).expanduser()
+        content = path.read_bytes()
+        content_type = (
+            request.content_type
+            or mimetypes.guess_type(path.name)[0]
+            or "application/octet-stream"
+        )
+        return client.upload_file_blob_v1(
+            workspace_id,
+            request.parent_dir,
+            content=content,
+            content_type=content_type,
+        )
+    except Exception as e:
+        raise Exception(f"Failed to upload file: {str(e)}")
+
+
+# ==================== AI CHAT TOOLS ====================
+
+@mcp.tool(
+    name="appflowy_create_chat",
+    description=(
+        "Create an AI chat in a workspace. Optionally pass rag_ids (page view ids) "
+        "the AI should use as context. Returns the chat_id for follow-up calls."
+    ),
+)
+def appflowy_create_chat(workspace_id: str, request: CreateChatRequest):
+    """Create an AppFlowy AI chat."""
+    ensure_authenticated()
+
+    try:
+        chat_id = request.chat_id or str(uuid.uuid4())
+        client._request(
+            "POST",
+            f"/api/chat/{workspace_id}",
+            json_body={
+                "chat_id": chat_id,
+                "name": request.name,
+                "rag_ids": request.rag_ids,
+            },
+        )
+        return {"chat_id": chat_id, "name": request.name, "rag_ids": request.rag_ids}
+    except Exception as e:
+        raise Exception(f"Failed to create chat: {str(e)}")
+
+
+@mcp.tool(name="appflowy_delete_chat", description="Delete an AI chat.")
+def appflowy_delete_chat(workspace_id: str, chat_id: str):
+    """Delete an AppFlowy AI chat."""
+    ensure_authenticated()
+
+    try:
+        client._request("DELETE", f"/api/chat/{workspace_id}/{chat_id}")
+        return {"deleted": True, "chat_id": chat_id}
+    except Exception as e:
+        raise Exception(f"Failed to delete chat: {str(e)}")
+
+
+@mcp.tool(
+    name="appflowy_get_chat_settings",
+    description="Get an AI chat's settings (name, rag_ids, metadata).",
+)
+def appflowy_get_chat_settings(workspace_id: str, chat_id: str):
+    """Get AppFlowy AI chat settings."""
+    ensure_authenticated()
+
+    try:
+        body = client._request("GET", f"/api/chat/{workspace_id}/{chat_id}/settings")
+        return response_data(body)
+    except Exception as e:
+        raise Exception(f"Failed to get chat settings: {str(e)}")
+
+
+@mcp.tool(
+    name="appflowy_update_chat_settings",
+    description="Update an AI chat's name, rag_ids, or metadata.",
+)
+def appflowy_update_chat_settings(
+    workspace_id: str, chat_id: str, request: UpdateChatSettingsRequest
+):
+    """Update AppFlowy AI chat settings."""
+    ensure_authenticated()
+
+    try:
+        client._request(
+            "POST",
+            f"/api/chat/{workspace_id}/{chat_id}/settings",
+            json_body=request.model_dump(exclude_none=True),
+        )
+        body = client._request("GET", f"/api/chat/{workspace_id}/{chat_id}/settings")
+        return response_data(body)
+    except Exception as e:
+        raise Exception(f"Failed to update chat settings: {str(e)}")
+
+
+@mcp.tool(
+    name="appflowy_list_chat_messages",
+    description=(
+        "List messages in an AI chat, newest first. Use limit to bound the page "
+        "size and before_message_id to page backwards through history."
+    ),
+)
+def appflowy_list_chat_messages(
+    workspace_id: str,
+    chat_id: str,
+    limit: int = 20,
+    before_message_id: int | None = None,
+):
+    """List AppFlowy AI chat messages."""
+    ensure_authenticated()
+
+    try:
+        params: dict = {"limit": limit}
+        if before_message_id is not None:
+            params["before"] = before_message_id
+        body = client._request(
+            "GET", f"/api/chat/{workspace_id}/{chat_id}/message", params=params
+        )
+        return response_data(body)
+    except Exception as e:
+        raise Exception(f"Failed to list chat messages: {str(e)}")
+
+
+@mcp.tool(
+    name="appflowy_chat_ask",
+    description=(
+        "Ask the workspace AI a question in an existing chat and wait for the "
+        "answer (non-streaming). Returns both the question message id and the "
+        "AI answer. Create a chat first with appflowy_create_chat."
+    ),
+)
+def appflowy_chat_ask(workspace_id: str, chat_id: str, question: str):
+    """Ask the AppFlowy AI a question and return its answer."""
+    ensure_authenticated()
+
+    try:
+        body = client._request(
+            "POST",
+            f"/api/chat/{workspace_id}/{chat_id}/message/question",
+            # message_type is a u8 enum: 0=System, 1=User.
+            json_body={"content": question, "message_type": 1},
+        )
+        question_message = response_data(body)
+        question_id = question_message.get("message_id")
+        if question_id is None:
+            raise Exception("Question response did not include message_id.")
+
+        body = client._request(
+            "GET", f"/api/chat/{workspace_id}/{chat_id}/{question_id}/answer"
+        )
+        answer = response_data(body)
+        return {
+            "question_message_id": question_id,
+            "answer_message_id": answer.get("message_id"),
+            "answer": answer.get("content"),
+        }
+    except Exception as e:
+        raise Exception(f"Failed to ask chat question: {str(e)}")
 
 
 def main():

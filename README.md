@@ -1,6 +1,6 @@
 # AppFlowy MCP
 
-An MCP server for AppFlowy. This fork adds workspace folder, space, page, trash, favorite, and basic page-content tools on top of the original workspace/database/row tools.
+An MCP server for AppFlowy with 68 tools covering workspaces, spaces, pages, page content, Markdown import, databases, rows, search, members and invitations, publishing, quick notes, file upload, and AI chat.
 
 ## Requirements
 
@@ -101,17 +101,45 @@ To create a page inside a space, pass the workspace ID and use the space `view_i
 - `appflowy_create_space`
 - `appflowy_update_space`
 
+### Workspace Management
+
+- `appflowy_create_workspace`
+- `appflowy_update_workspace`
+- `appflowy_delete_workspace`
+- `appflowy_leave_workspace`
+- `appflowy_get_workspace_settings`
+- `appflowy_update_workspace_settings`
+- `appflowy_get_workspace_usage`
+
+Note: creating extra workspaces requires a paid AppFlowy Cloud plan; the free plan returns a workspace-limit error.
+
+### Members And Invitations
+
+- `appflowy_list_members`
+- `appflowy_update_member`
+- `appflowy_remove_members`
+- `appflowy_invite_members`
+- `appflowy_list_invitations`
+- `appflowy_accept_invitation`
+
+Member roles are `Owner`, `Member`, or `Guest`.
+
 ### Pages
 
 - `appflowy_create_page`
 - `appflowy_get_page`
 - `appflowy_update_page`
+- `appflowy_move_page`
+- `appflowy_duplicate_page`
 - `appflowy_move_page_to_trash`
 - `appflowy_restore_page_from_trash`
 - `appflowy_delete_page_from_trash`
+- `appflowy_restore_all_from_trash`
+- `appflowy_empty_trash`
 - `appflowy_favorite_page`
 - `appflowy_list_trash`
 - `appflowy_list_favorites`
+- `appflowy_list_recent`
 
 ### Page Content
 
@@ -206,11 +234,57 @@ Example single-file import:
 
 - `appflowy_list_databases`
 - `appflowy_get_database_fields`
+- `appflowy_create_database_field`
 - `appflowy_list_rows`
 - `appflowy_get_row_details`
 - `appflowy_create_row`
 - `appflowy_upsert_row`
 - `appflowy_get_updated_rows`
+
+`appflowy_create_database_field` field types: 0=RichText, 1=Number, 2=DateTime, 3=SingleSelect, 4=MultiSelect, 5=Checkbox, 6=URL, 7=Checklist.
+
+### Search
+
+- `appflowy_search`
+
+Full-text search across a workspace. Newly written content can take a short while to appear while the server indexes it.
+
+### Publishing
+
+- `appflowy_publish_page`
+- `appflowy_unpublish_page`
+- `appflowy_get_publish_namespace`
+- `appflowy_set_publish_namespace`
+- `appflowy_list_published_views`
+
+`appflowy_publish_page` returns the publish info (namespace and publish name) for building the public URL. On older server deployments that lack the list endpoint, `appflowy_list_published_views` falls back to walking the workspace folder tree.
+
+### Quick Notes
+
+- `appflowy_list_quick_notes`
+- `appflowy_create_quick_note`
+- `appflowy_update_quick_note`
+- `appflowy_delete_quick_note`
+
+Quick note tools accept plain `text` (converted to paragraph blocks) or raw `data` JSON.
+
+### AI Chat
+
+- `appflowy_create_chat`
+- `appflowy_delete_chat`
+- `appflowy_get_chat_settings`
+- `appflowy_update_chat_settings`
+- `appflowy_list_chat_messages`
+- `appflowy_chat_ask`
+
+Create a chat with `appflowy_create_chat` (optionally passing `rag_ids`, page view ids the AI may use as context), then ask questions with `appflowy_chat_ask`, which posts the question and waits for the complete AI answer (non-streaming).
+
+### User And Files
+
+- `appflowy_get_user_profile`
+- `appflowy_upload_file`
+
+`appflowy_upload_file` uploads a local file to AppFlowy file storage and returns a URL that image or file blocks can reference. Use the page `view_id` as `parent_dir`.
 
 ## Local Run
 

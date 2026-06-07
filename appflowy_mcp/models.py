@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -135,3 +135,114 @@ class ImportMarkdownDirectoryRequest(BaseModel):
     parent_view_id: str = Field(..., description=PARENT_VIEW_ID_DESC)
     path: str = Field(..., min_length=1)
     upload_assets: bool = True
+
+
+WorkspaceRole = Literal["Owner", "Member", "Guest"]
+
+
+class CreateWorkspaceRequest(BaseModel):
+    workspace_name: str = Field(..., min_length=1)
+    workspace_icon: str | None = None
+
+
+class UpdateWorkspaceRequest(BaseModel):
+    workspace_name: str | None = None
+    workspace_icon: str | None = None
+
+
+class UpdateWorkspaceSettingsRequest(BaseModel):
+    disable_search_indexing: bool | None = None
+    ai_model: str | None = None
+
+
+class UpdateMemberRequest(BaseModel):
+    email: str = Field(..., min_length=1)
+    role: WorkspaceRole | None = None
+    name: str | None = None
+
+
+class InviteMembersRequest(BaseModel):
+    emails: list[str] = Field(..., min_length=1)
+    role: WorkspaceRole = "Member"
+    skip_email_send: bool = False
+
+
+class DuplicatePageRequest(BaseModel):
+    suffix: str | None = Field(
+        None, description='Name suffix for the copy, e.g. " (Copy)".'
+    )
+
+
+class PublishPageRequest(BaseModel):
+    publish_name: str | None = Field(
+        None, description="URL slug for the published page. Server picks one if omitted."
+    )
+    visible_database_view_ids: list[str] | None = None
+    comments_enabled: bool = True
+    duplicate_enabled: bool = True
+
+
+class CreateQuickNoteRequest(BaseModel):
+    text: str | None = Field(
+        None, description="Plain text convenience; converted to paragraph blocks."
+    )
+    data: Any | None = Field(
+        None, description="Raw quick-note JSON data. Takes precedence over text."
+    )
+
+
+class UpdateQuickNoteRequest(BaseModel):
+    text: str | None = Field(
+        None, description="Plain text convenience; converted to paragraph blocks."
+    )
+    data: Any | None = Field(
+        None, description="Raw quick-note JSON data. Takes precedence over text."
+    )
+
+
+class CreateDatabaseFieldRequest(BaseModel):
+    name: str = Field(..., min_length=1)
+    field_type: int = Field(
+        ...,
+        description=(
+            "AppFlowy field type id: 0=RichText, 1=Number, 2=DateTime, "
+            "3=SingleSelect, 4=MultiSelect, 5=Checkbox, 6=URL, 7=Checklist."
+        ),
+    )
+    type_option_data: dict[str, Any] | None = None
+
+
+class UploadFileRequest(BaseModel):
+    path: str = Field(..., min_length=1, description="Local file path to upload.")
+    parent_dir: str = Field(
+        ...,
+        description=(
+            "Directory key the blob is stored under; AppFlowy convention is the "
+            "view_id of the page the file belongs to."
+        ),
+    )
+    content_type: str | None = Field(
+        None, description="MIME type. Guessed from the file name if omitted."
+    )
+
+
+class CreateChatRequest(BaseModel):
+    name: str = Field(..., min_length=1)
+    rag_ids: list[str] = Field(
+        default_factory=list,
+        description=(
+            "View ids of pages the AI may use as RAG context. Empty list means "
+            "no page context."
+        ),
+    )
+    chat_id: str | None = Field(
+        None, description="Chat UUID. Generated automatically if omitted."
+    )
+
+
+class UpdateChatSettingsRequest(BaseModel):
+    name: str | None = None
+    rag_ids: list[str] | None = Field(
+        None, description="Replace the set of RAG context view ids."
+    )
+    metadata: dict[str, Any] | None = None

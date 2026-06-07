@@ -238,14 +238,16 @@ class AppFlowyClient:
         method: str,
         path: str,
         params: dict[str, Any] | None = None,
-        json_body: dict[str, Any] | None = None,
+        json_body: dict[str, Any] | list[Any] | None = None,
         *,
         allow_reauth: bool = True,
     ) -> dict[str, Any]:
+        # Some endpoints (remove members, invite) take a top-level JSON array;
+        # only dict bodies get the drop-None-values treatment.
         json_payload = (
             {k: v for k, v in json_body.items() if v is not None}
-            if json_body is not None
-            else None
+            if isinstance(json_body, dict)
+            else json_body
         )
 
         def build() -> httpx.Response:
@@ -354,5 +356,12 @@ class AppFlowyClient:
                 else response.text
             )
             raise Exception(f"{message} (HTTP {response.status_code})")
+
+        # AppFlowy returns business errors as HTTP 200 with a non-zero code in
+        # the {code, message, data} envelope (e.g. 1026 workspace limit).
+        if isinstance(body, dict) and body.get("code") not in (None, 0):
+            raise Exception(
+                f"{body.get('message', 'AppFlowy error')} (code {body['code']})"
+            )
 
         return body if isinstance(body, dict) else {"data": body}

@@ -98,6 +98,12 @@ def parse_markdown_to_blocks(
             code_lines.append(line)
             continue
 
+        # Blank lines are paragraph separators in Markdown, not content;
+        # emitting them as empty paragraphs litters imported docs with
+        # blank lines.
+        if not stripped:
+            continue
+
         if stripped in {"---", "***"}:
             blocks.append({"type": "divider", "data": {}})
             continue
