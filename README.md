@@ -305,31 +305,33 @@ Create a chat with `appflowy_create_chat` (optionally passing `rag_ids`, page vi
 
 ## Command-Line Interface
 
-The package also ships an `appflowy` CLI built on the same client, aimed at scriptable workflows — backups via cron, bulk import, quick lookups. Credentials come from the same `APPFLOWY_EMAIL` / `APPFLOWY_PASSWORD` / `APPFLOWY_BASE_URL` environment variables (or a `.env` file).
+A standalone [`appflowy-cli`](https://pypi.org/project/appflowy-cli/) package (a thin wrapper around this one) exposes the same client as a CLI, aimed at scriptable workflows — backups via cron, bulk import, quick lookups. Credentials come from the same `APPFLOWY_EMAIL` / `APPFLOWY_PASSWORD` / `APPFLOWY_BASE_URL` environment variables (or a `.env` file).
 
 ```bash
 # look around
-uvx --from appflowy-mcp appflowy workspaces
-uvx --from appflowy-mcp appflowy spaces <workspace-id>
-uvx --from appflowy-mcp appflowy folder <workspace-id> --depth 2
-uvx --from appflowy-mcp appflowy search <workspace-id> "query"
+uvx appflowy-cli workspaces
+uvx appflowy-cli spaces <workspace-id>
+uvx appflowy-cli folder <workspace-id> --depth 2
+uvx appflowy-cli search <workspace-id> "query"
 
 # export (Markdown, inline formatting preserved)
-uvx --from appflowy-mcp appflowy export-page <workspace-id> <page-id> -o note.md
-uvx --from appflowy-mcp appflowy export-space <workspace-id> <space-id> -o ./backup
-uvx --from appflowy-mcp appflowy export-workspace <workspace-id> -o ./backup
+uvx appflowy-cli export-page <workspace-id> <page-id> -o note.md
+uvx appflowy-cli export-space <workspace-id> <space-id> -o ./backup
+uvx appflowy-cli export-workspace <workspace-id> -o ./backup
 
 # import / create
-uvx --from appflowy-mcp appflowy import-file <workspace-id> <parent-id> note.md
-uvx --from appflowy-mcp appflowy import-dir <workspace-id> <parent-id> ./notes
-echo "# Note" | uvx --from appflowy-mcp appflowy save <workspace-id> <parent-id> "Title"
+uvx appflowy-cli import-file <workspace-id> <parent-id> note.md
+uvx appflowy-cli import-dir <workspace-id> <parent-id> ./notes
+echo "# Note" | uvx appflowy-cli save <workspace-id> <parent-id> "Title"
 ```
 
 Every command accepts `--json` for machine-readable output. A nightly workspace backup is one cron line:
 
 ```cron
-0 3 * * * APPFLOWY_EMAIL=... APPFLOWY_PASSWORD=... uvx --from appflowy-mcp appflowy export-workspace <workspace-id> -o ~/backups/appflowy-$(date +\%F)
+0 3 * * * APPFLOWY_EMAIL=... APPFLOWY_PASSWORD=... uvx appflowy-cli export-workspace <workspace-id> -o ~/backups/appflowy-$(date +\%F)
 ```
+
+During development, run the CLI from this repository with `uv run python -m appflowy_mcp.cli`.
 
 ## Local Run
 
