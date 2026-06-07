@@ -1,6 +1,6 @@
 [project]
 name = "appflowy-mcp"
-version = "0.3.0"
+version = "0.4.0"
 description = "AppFlowy MCP server for workspace, space, page, database, and row operations"
 readme = "README.md"
 requires-python = ">=3.14,<3.15"
@@ -14,6 +14,7 @@ dependencies = [
 
 [project.scripts]
 appflowy-mcp = "appflowy_mcp.server:main"
+appflowy = "appflowy_mcp.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/weironz/appflowy_mcp"

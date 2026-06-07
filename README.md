@@ -1,6 +1,6 @@
 # AppFlowy MCP
 
-An MCP server for [AppFlowy](https://github.com/appflowy-io/appflowy) with 73 tools covering workspaces, spaces, pages, page content, Markdown import and export, databases, rows, search, members and invitations, publishing, quick notes, file upload, and AI chat.
+An MCP server and CLI for [AppFlowy](https://github.com/appflowy-io/appflowy) with 73 tools covering workspaces, spaces, pages, page content, Markdown import and export, databases, rows, search, members and invitations, publishing, quick notes, file upload, and AI chat.
 
 ## Requirements
 
@@ -302,6 +302,34 @@ Create a chat with `appflowy_create_chat` (optionally passing `rag_ids`, page vi
 - `appflowy_upload_file`
 
 `appflowy_upload_file` uploads a local file to AppFlowy file storage and returns a URL that image or file blocks can reference. Use the page `view_id` as `parent_dir`.
+
+## Command-Line Interface
+
+The package also ships an `appflowy` CLI built on the same client, aimed at scriptable workflows — backups via cron, bulk import, quick lookups. Credentials come from the same `APPFLOWY_EMAIL` / `APPFLOWY_PASSWORD` / `APPFLOWY_BASE_URL` environment variables (or a `.env` file).
+
+```bash
+# look around
+uvx --from appflowy-mcp appflowy workspaces
+uvx --from appflowy-mcp appflowy spaces <workspace-id>
+uvx --from appflowy-mcp appflowy folder <workspace-id> --depth 2
+uvx --from appflowy-mcp appflowy search <workspace-id> "query"
+
+# export (Markdown, inline formatting preserved)
+uvx --from appflowy-mcp appflowy export-page <workspace-id> <page-id> -o note.md
+uvx --from appflowy-mcp appflowy export-space <workspace-id> <space-id> -o ./backup
+uvx --from appflowy-mcp appflowy export-workspace <workspace-id> -o ./backup
+
+# import / create
+uvx --from appflowy-mcp appflowy import-file <workspace-id> <parent-id> note.md
+uvx --from appflowy-mcp appflowy import-dir <workspace-id> <parent-id> ./notes
+echo "# Note" | uvx --from appflowy-mcp appflowy save <workspace-id> <parent-id> "Title"
+```
+
+Every command accepts `--json` for machine-readable output. A nightly workspace backup is one cron line:
+
+```cron
+0 3 * * * APPFLOWY_EMAIL=... APPFLOWY_PASSWORD=... uvx --from appflowy-mcp appflowy export-workspace <workspace-id> -o ~/backups/appflowy-$(date +\%F)
+```
 
 ## Local Run
 
