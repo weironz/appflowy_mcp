@@ -1,6 +1,6 @@
 # AppFlowy MCP
 
-An MCP server for AppFlowy with 68 tools covering workspaces, spaces, pages, page content, Markdown import, databases, rows, search, members and invitations, publishing, quick notes, file upload, and AI chat.
+An MCP server for [AppFlowy](https://github.com/appflowy-io/appflowy) with 68 tools covering workspaces, spaces, pages, page content, Markdown import, databases, rows, search, members and invitations, publishing, quick notes, file upload, and AI chat.
 
 ## Requirements
 
