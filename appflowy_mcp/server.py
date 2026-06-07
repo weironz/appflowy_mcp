@@ -21,6 +21,7 @@ from .models import (
     UpdatePageRequest,
     FavoritePageRequest,
     MovePageRequest,
+    ReorderPagesRequest,
     AppendBlocksRequest,
     AppendTextRequest,
     CreateMarkdownPageRequest,
@@ -452,6 +453,84 @@ def appflowy_move_page(workspace_id: str, page_id: str, request: MovePageRequest
         raise Exception(f"Failed to move page: {str(e)}")
 
 
+@mcp.tool(
+    name="appflowy_reorder_pages",
+    description=(
+        "Reorder the direct child pages of a space or page in one call. Give "
+        "either an explicit page_ids order or sort_by name/created_at/"
+        "last_edited_time. AppFlowy has no bulk-sort endpoint, so this chains "
+        "the per-page move endpoint, skipping pages already in place."
+    ),
+)
+def appflowy_reorder_pages(workspace_id: str, request: ReorderPagesRequest):
+    """Reorder the children of an AppFlowy space or page."""
+    ensure_authenticated()
+    ensure_parent_is_not_workspace(workspace_id, request.parent_view_id)
+
+    if (request.page_ids is None) == (request.sort_by is None):
+        raise Exception("Provide exactly one of page_ids or sort_by.")
+
+    try:
+        body = client._request(
+            "GET",
+            f"/api/workspace/{workspace_id}/folder",
+            params={"depth": 1, "root_view_id": request.parent_view_id},
+        )
+        children = response_data(body).get("children") or []
+        current = [child["view_id"] for child in children]
+        names = {child["view_id"]: child.get("name") for child in children}
+
+        if request.page_ids is not None:
+            unknown = [pid for pid in request.page_ids if pid not in current]
+            if unknown:
+                raise Exception(
+                    f"Not direct children of {request.parent_view_id}: {unknown}"
+                )
+            listed = set(request.page_ids)
+            target = request.page_ids + [
+                pid for pid in current if pid not in listed
+            ]
+        else:
+            def sort_key(child):
+                value = child.get(request.sort_by)
+                if request.sort_by == "name":
+                    return (value or "").casefold()
+                return value or ""
+
+            target = [
+                child["view_id"]
+                for child in sorted(
+                    children, key=sort_key, reverse=request.descending
+                )
+            ]
+
+        moves = 0
+        for index, page_id in enumerate(target):
+            if current[index] == page_id:
+                continue
+            client._request(
+                "POST",
+                f"/api/workspace/{workspace_id}/page-view/{page_id}/move",
+                json_body={
+                    "new_parent_view_id": request.parent_view_id,
+                    "prev_view_id": target[index - 1] if index else None,
+                },
+            )
+            current.remove(page_id)
+            current.insert(index, page_id)
+            moves += 1
+
+        return {
+            "parent_view_id": request.parent_view_id,
+            "order": [
+                {"view_id": pid, "name": names.get(pid)} for pid in target
+            ],
+            "moves_performed": moves,
+        }
+    except Exception as e:
+        raise Exception(f"Failed to reorder pages: {str(e)}")
+
+
 @mcp.tool(name="appflowy_move_page_to_trash", description="Move a page to trash.")
 def appflowy_move_page_to_trash(workspace_id: str, page_id: str):
     """Move an AppFlowy page view to trash."""
@@ -512,6 +591,30 @@ def appflowy_favorite_page(
         return response_data(body)
     except Exception as e:
         raise Exception(f"Failed to update favorite state: {str(e)}")
+
+
+@mcp.tool(
+    name="appflowy_reorder_favorite",
+    description=(
+        "Reorder a page within the favorites list. prev_view_id is the "
+        "favorite to place it after (omit to put it first)."
+    ),
+)
+def appflowy_reorder_favorite(
+    workspace_id: str, page_id: str, prev_view_id: str | None = None
+):
+    """Reorder an AppFlowy page in the favorites list."""
+    ensure_authenticated()
+
+    try:
+        client._request(
+            "POST",
+            f"/api/workspace/{workspace_id}/page-view/{page_id}/reorder-favorite",
+            json_body={"prev_view_id": prev_view_id},
+        )
+        return {"page_id": page_id, "prev_view_id": prev_view_id}
+    except Exception as e:
+        raise Exception(f"Failed to reorder favorite: {str(e)}")
 
 
 @mcp.tool(name="appflowy_list_trash", description="List trashed pages in a workspace.")

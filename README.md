@@ -1,6 +1,6 @@
 # AppFlowy MCP
 
-An MCP server for [AppFlowy](https://github.com/appflowy-io/appflowy) with 68 tools covering workspaces, spaces, pages, page content, Markdown import, databases, rows, search, members and invitations, publishing, quick notes, file upload, and AI chat.
+An MCP server for [AppFlowy](https://github.com/appflowy-io/appflowy) with 70 tools covering workspaces, spaces, pages, page content, Markdown import, databases, rows, search, members and invitations, publishing, quick notes, file upload, and AI chat.
 
 ## Requirements
 
@@ -133,6 +133,8 @@ Member roles are `Owner`, `Member`, or `Guest`.
 - `appflowy_get_page`
 - `appflowy_update_page`
 - `appflowy_move_page`
+- `appflowy_reorder_pages`
+- `appflowy_reorder_favorite`
 - `appflowy_duplicate_page`
 - `appflowy_move_page_to_trash`
 - `appflowy_restore_page_from_trash`
@@ -143,6 +145,8 @@ Member roles are `Owner`, `Member`, or `Guest`.
 - `appflowy_list_trash`
 - `appflowy_list_favorites`
 - `appflowy_list_recent`
+
+AppFlowy has no bulk-sort endpoint; sibling order is controlled by the move endpoint's `prev_view_id`. `appflowy_reorder_pages` builds on it to reorder all direct children of a space or page in one call — pass an explicit `page_ids` order, or `sort_by` one of `name`, `created_at`, `last_edited_time` (with optional `descending`); pages already in place are skipped. `appflowy_reorder_favorite` reorders a page within the favorites list.
 
 ### Page Content
 

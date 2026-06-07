@@ -246,3 +246,31 @@ class UpdateChatSettingsRequest(BaseModel):
         None, description="Replace the set of RAG context view ids."
     )
     metadata: dict[str, Any] | None = None
+
+
+class ReorderPagesRequest(BaseModel):
+    parent_view_id: str = Field(
+        ...,
+        description=(
+            "view_id of the Space or Page whose direct children should be "
+            "reordered. Must NOT be the workspace_id."
+        ),
+    )
+    page_ids: list[str] | None = Field(
+        None,
+        description=(
+            "Explicit desired order of child view_ids. Listed pages are placed "
+            "first in this order; unlisted children keep their current relative "
+            "order after them. Mutually exclusive with sort_by."
+        ),
+    )
+    sort_by: Literal["name", "created_at", "last_edited_time"] | None = Field(
+        None,
+        description=(
+            "Sort the children by this field instead of giving an explicit "
+            "page_ids order. Mutually exclusive with page_ids."
+        ),
+    )
+    descending: bool = Field(
+        False, description="Reverse the sort_by order. Ignored with page_ids."
+    )
