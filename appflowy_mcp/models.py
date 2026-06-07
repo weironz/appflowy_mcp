@@ -274,3 +274,23 @@ class ReorderPagesRequest(BaseModel):
     descending: bool = Field(
         False, description="Reverse the sort_by order. Ignored with page_ids."
     )
+
+
+class ExportPageRequest(BaseModel):
+    path: str = Field(
+        ...,
+        description=(
+            "Local destination file path for the Markdown export. '.md' is "
+            "appended if missing. Parent directories are created."
+        ),
+    )
+
+
+class ExportTreeRequest(BaseModel):
+    path: str = Field(
+        ...,
+        description=(
+            "Local destination directory. Created if missing; must be empty "
+            "or not yet exist so existing files are never overwritten."
+        ),
+    )

@@ -1,6 +1,6 @@
 # AppFlowy MCP
 
-An MCP server for [AppFlowy](https://github.com/appflowy-io/appflowy) with 70 tools covering workspaces, spaces, pages, page content, Markdown import, databases, rows, search, members and invitations, publishing, quick notes, file upload, and AI chat.
+An MCP server for [AppFlowy](https://github.com/appflowy-io/appflowy) with 73 tools covering workspaces, spaces, pages, page content, Markdown import and export, databases, rows, search, members and invitations, publishing, quick notes, file upload, and AI chat.
 
 ## Requirements
 
@@ -236,6 +236,16 @@ Example single-file import:
   "upload_assets": true
 }
 ```
+
+### Markdown Export
+
+- `appflowy_export_page`
+- `appflowy_export_space`
+- `appflowy_export_workspace`
+
+AppFlowy-Cloud has no export REST endpoint (the desktop app exports client-side), so these tools rebuild Markdown from the page collab data. The raw yjs update returned by the page-view endpoint is decoded with pycrdt, which preserves inline formatting (bold, italic, strikethrough, inline code, links) that the server's JSON conversion would flatten.
+
+`appflowy_export_page` writes one page to a local `.md` file. `appflowy_export_space` exports a space (or any page subtree) as a directory tree that mirrors the import convention — a page with children becomes a folder whose own content is `README.md`, leaf pages become `.md` files. `appflowy_export_workspace` does the same for every space in the workspace. Non-document views (grids, boards, calendars) are skipped and reported in warnings, and the destination directory must be empty so existing files are never overwritten.
 
 ### Databases And Rows
 

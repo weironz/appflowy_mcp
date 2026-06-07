@@ -6,6 +6,7 @@ from pathlib import Path
 from fastmcp import FastMCP
 
 from .client import DEFAULT_BASE_URL, AppFlowyClient
+from .export import decode_document, document_to_markdown, sanitize_filename
 from .importer import MarkdownImporter
 from .markdown import parse_content_to_blocks, parse_markdown_to_blocks
 from .models import (
@@ -41,6 +42,8 @@ from .models import (
     UploadFileRequest,
     CreateChatRequest,
     UpdateChatSettingsRequest,
+    ExportPageRequest,
+    ExportTreeRequest,
 )
 from dotenv import load_dotenv
 
@@ -1481,6 +1484,194 @@ def appflowy_upload_file(workspace_id: str, request: UploadFileRequest):
         )
     except Exception as e:
         raise Exception(f"Failed to upload file: {str(e)}")
+
+
+# ==================== EXPORT TOOLS ====================
+#
+# AppFlowy-Cloud has no export REST endpoint (the desktop app exports
+# client-side), so these tools rebuild Markdown from the page collab:
+# the page-view endpoint's encoded_collab is a raw yjs update, decoded
+# with pycrdt to keep inline formatting that collab/json flattens.
+
+def fetch_page_markdown(workspace_id: str, view_id: str, title: str | None) -> str:
+    body = client._request(
+        "GET", f"/api/workspace/{workspace_id}/page-view/{view_id}"
+    )
+    encoded = response_data(body).get("data", {}).get("encoded_collab")
+    if not encoded:
+        raise Exception("Page response did not include encoded_collab.")
+    return document_to_markdown(decode_document(encoded), title=title)
+
+
+def unique_path(path: Path) -> Path:
+    if not path.exists():
+        return path
+    stem, suffix = path.stem, path.suffix
+    counter = 2
+    while True:
+        candidate = path.with_name(f"{stem} ({counter}){suffix}")
+        if not candidate.exists():
+            return candidate
+        counter += 1
+
+
+def export_views_to_directory(
+    workspace_id: str,
+    views: list[dict],
+    directory: Path,
+    exported: list[str],
+    warnings: list[str],
+) -> None:
+    for view in views:
+        name = view.get("name") or ""
+        children = view.get("children") or []
+        fallback = str(view.get("view_id", ""))[:8]
+        filename = sanitize_filename(name, fallback)
+
+        if view.get("layout", 0) != 0:
+            warnings.append(
+                f"skipped non-document view '{name}' (layout {view.get('layout')})"
+            )
+            continue
+
+        markdown = None
+        if not view.get("is_space"):
+            try:
+                markdown = fetch_page_markdown(
+                    workspace_id, view["view_id"], title=name
+                )
+            except Exception as e:
+                warnings.append(f"failed to export '{name}': {e}")
+
+        if children:
+            subdir = unique_path(directory / filename)
+            subdir.mkdir(parents=True)
+            if markdown is not None:
+                (subdir / "README.md").write_text(markdown, encoding="utf-8")
+                exported.append(str(subdir / "README.md"))
+            export_views_to_directory(
+                workspace_id, children, subdir, exported, warnings
+            )
+        elif markdown is not None:
+            target = unique_path(directory / f"{filename}.md")
+            target.write_text(markdown, encoding="utf-8")
+            exported.append(str(target))
+
+
+@mcp.tool(
+    name="appflowy_export_page",
+    description=(
+        "Export a single page as a local Markdown file, preserving inline "
+        "formatting (bold, italic, links, code). Child pages are not included; "
+        "use appflowy_export_space for a whole subtree."
+    ),
+)
+def appflowy_export_page(workspace_id: str, page_id: str, request: ExportPageRequest):
+    """Export an AppFlowy page to a local Markdown file."""
+    ensure_authenticated()
+
+    try:
+        body = client._request(
+            "GET", f"/api/workspace/{workspace_id}/page-view/{page_id}"
+        )
+        page = response_data(body)
+        name = page.get("view", {}).get("name") or page_id
+        encoded = page.get("data", {}).get("encoded_collab")
+        if not encoded:
+            raise Exception("Page response did not include encoded_collab.")
+        markdown = document_to_markdown(decode_document(encoded), title=name)
+
+        path = Path(request.path).expanduser()
+        if path.suffix.lower() not in {".md", ".markdown"}:
+            path = path.with_name(path.name + ".md")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path = unique_path(path)
+        path.write_text(markdown, encoding="utf-8")
+        return {"page_id": page_id, "name": name, "path": str(path)}
+    except Exception as e:
+        raise Exception(f"Failed to export page: {str(e)}")
+
+
+@mcp.tool(
+    name="appflowy_export_space",
+    description=(
+        "Export a space (or any page subtree) to a local directory of Markdown "
+        "files, mirroring appflowy_import_markdown_directory: a page with "
+        "children becomes a folder whose own content is README.md, leaf pages "
+        "become .md files. Non-document views (grids, boards) are skipped with "
+        "warnings."
+    ),
+)
+def appflowy_export_space(
+    workspace_id: str, space_view_id: str, request: ExportTreeRequest
+):
+    """Export an AppFlowy space subtree to a local directory."""
+    ensure_authenticated()
+
+    try:
+        body = client._request(
+            "GET",
+            f"/api/workspace/{workspace_id}/folder",
+            params={"depth": 10, "root_view_id": space_view_id},
+        )
+        root = response_data(body)
+
+        directory = Path(request.path).expanduser()
+        if directory.exists() and any(directory.iterdir()):
+            raise Exception(f"Destination directory is not empty: {directory}")
+        directory.mkdir(parents=True, exist_ok=True)
+
+        exported: list[str] = []
+        warnings: list[str] = []
+        export_views_to_directory(
+            workspace_id, [root], directory, exported, warnings
+        )
+        return {
+            "root_view_id": space_view_id,
+            "path": str(directory),
+            "exported_files": exported,
+            "warnings": warnings,
+        }
+    except Exception as e:
+        raise Exception(f"Failed to export space: {str(e)}")
+
+
+@mcp.tool(
+    name="appflowy_export_workspace",
+    description=(
+        "Export every space in a workspace to a local directory tree of "
+        "Markdown files. Each space becomes a top-level folder; pages follow "
+        "the appflowy_export_space layout."
+    ),
+)
+def appflowy_export_workspace(workspace_id: str, request: ExportTreeRequest):
+    """Export an entire AppFlowy workspace to a local directory."""
+    ensure_authenticated()
+
+    try:
+        body = client._request(
+            "GET", f"/api/workspace/{workspace_id}/folder", params={"depth": 10}
+        )
+        root = response_data(body)
+
+        directory = Path(request.path).expanduser()
+        if directory.exists() and any(directory.iterdir()):
+            raise Exception(f"Destination directory is not empty: {directory}")
+        directory.mkdir(parents=True, exist_ok=True)
+
+        exported: list[str] = []
+        warnings: list[str] = []
+        export_views_to_directory(
+            workspace_id, root.get("children") or [], directory, exported, warnings
+        )
+        return {
+            "workspace_id": workspace_id,
+            "path": str(directory),
+            "exported_files": exported,
+            "warnings": warnings,
+        }
+    except Exception as e:
+        raise Exception(f"Failed to export workspace: {str(e)}")
 
 
 # ==================== AI CHAT TOOLS ====================
