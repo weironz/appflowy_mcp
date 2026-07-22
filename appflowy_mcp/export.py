@@ -150,6 +150,10 @@ def document_to_markdown(document: dict[str, Any], title: str | None = None) -> 
                 lines.append("")
             elif ty == "paragraph":
                 pass  # empty paragraph -> blank separator already handled
+            else:
+                # A block type we don't render (e.g. table/grid/math). Leave a
+                # visible marker so its presence isn't silently lost on export.
+                lines.extend([f"{prefix}<!-- unsupported block: {ty} -->", ""])
 
             child_ids = children_map.get(block.get("children", ""), [])
             if child_ids:

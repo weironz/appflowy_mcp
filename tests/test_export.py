@@ -198,3 +198,42 @@ def test_page_markdown_falls_back_to_collab(monkeypatch):
 
     out = server.fetch_page_markdown("ws", "vid", "T")
     assert out == "# T\n\nrecovered"
+
+
+def test_headings_h4_h6_import():
+    blocks = parse_markdown_to_blocks("#### H4\n##### H5\n###### H6")
+    levels = [b["data"]["level"] for b in blocks if b["type"] == "heading"]
+    assert levels == [4, 5, 6]
+
+
+def test_unsupported_block_marked_on_export():
+    doc = make_document([("table", {}, None, [])])
+    out = document_to_markdown(doc)
+    assert "unsupported block: table" in out
+
+
+def test_export_prefetches_and_writes(tmp_path, monkeypatch):
+    from appflowy_mcp import server
+
+    calls = []
+
+    def fake_fetch(ws, vid, title):
+        calls.append(vid)
+        return f"# {title}\n\nbody-{vid}"
+
+    monkeypatch.setattr(server, "fetch_page_markdown", fake_fetch)
+    views = [
+        {"view_id": "s1", "name": "space", "is_space": True, "layout": 0, "children": [
+            {"view_id": "d1", "name": "Doc1", "layout": 0, "children": []},
+            {"view_id": "f1", "name": "Folder", "layout": 0, "children": [
+                {"view_id": "d2", "name": "Doc2", "layout": 0, "children": []},
+            ]},
+        ]},
+    ]
+    exported, warnings = [], []
+    server.export_views_to_directory("ws", views, tmp_path, exported, warnings)
+
+    assert sorted(calls) == ["d1", "d2", "f1"]  # each document fetched exactly once
+    names = sorted(p.name for p in tmp_path.rglob("*.md"))
+    assert names == ["Doc1.md", "Doc2.md", "README.md"]
+    assert warnings == []

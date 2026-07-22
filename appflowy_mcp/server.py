@@ -3,6 +3,7 @@ import mimetypes
 import os
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from fastmcp import FastMCP
@@ -906,6 +907,173 @@ def appflowy_search(
         raise Exception(f"Failed to search workspace: {str(e)}")
 
 
+@mcp.tool(
+    name="appflowy_search_summary",
+    description=(
+        "Search the workspace and return an AI-generated, cited summary that "
+        "answers the query over the matched documents. Runs a document search "
+        "first, then summarizes the results (each summary lists its source "
+        "object_ids)."
+    ),
+)
+def appflowy_search_summary(
+    workspace_id: str, query: str, limit: int = 5, only_context: bool = False
+):
+    """Search then summarize: returns {summaries: [{content, highlights, sources}]}."""
+    ensure_authenticated()
+
+    try:
+        search = client._request(
+            "GET", f"/api/search/{workspace_id}", params={"query": query, "limit": limit}
+        )
+        items = response_data(search)
+        if isinstance(items, dict):
+            items = items.get("items") or items.get("data") or []
+        results = [
+            {"object_id": it["object_id"], "content": it.get("content") or it.get("preview") or ""}
+            for it in (items or [])
+            if isinstance(it, dict) and it.get("object_id")
+        ]
+        if not results:
+            return {"summaries": [], "note": "No matching documents to summarize."}
+        body = client._request(
+            "GET",
+            f"/api/search/{workspace_id}/summary",
+            json_body={
+                "query": query,
+                "search_results": results,
+                "only_context": only_context,
+            },
+        )
+        return response_data(body)
+    except Exception as e:
+        raise Exception(f"Failed to summarize search: {str(e)}")
+
+
+@mcp.tool(
+    name="appflowy_duplicate_published_page",
+    description=(
+        "Duplicate a published page or template into a workspace. dest_view_id "
+        "is the destination parent Space or Page (not the workspace_id)."
+    ),
+)
+def appflowy_duplicate_published_page(
+    workspace_id: str, published_view_id: str, dest_view_id: str
+):
+    """Copy a published view into the workspace under dest_view_id."""
+    ensure_authenticated()
+    ensure_parent_is_not_workspace(workspace_id, dest_view_id)
+
+    try:
+        body = client._request(
+            "POST",
+            f"/api/workspace/{workspace_id}/published-duplicate",
+            json_body={
+                "published_view_id": published_view_id,
+                "dest_view_id": dest_view_id,
+            },
+        )
+        return response_data(body)
+    except Exception as e:
+        raise Exception(f"Failed to duplicate published page: {str(e)}")
+
+
+@mcp.tool(
+    name="appflowy_get_published_outline",
+    description=(
+        "Get the full page tree of a published workspace by its publish "
+        "namespace. Public: no membership in that workspace is required."
+    ),
+)
+def appflowy_get_published_outline(publish_namespace: str):
+    """Read the outline (recursive view tree) of a published namespace."""
+    try:
+        body = client._request(
+            "GET", f"/api/workspace/published-outline/{publish_namespace}"
+        )
+        return response_data(body)
+    except Exception as e:
+        raise Exception(f"Failed to get published outline: {str(e)}")
+
+
+@mcp.tool(
+    name="appflowy_get_published_comments",
+    description="List comments on a published view.",
+)
+def appflowy_get_published_comments(view_id: str):
+    """Get comments on a published view."""
+    ensure_authenticated()
+
+    try:
+        body = client._request(
+            "GET", f"/api/workspace/published-info/{view_id}/comment"
+        )
+        return response_data(body)
+    except Exception as e:
+        raise Exception(f"Failed to get published comments: {str(e)}")
+
+
+@mcp.tool(
+    name="appflowy_add_published_comment",
+    description="Add a comment to a published view, optionally replying to another comment.",
+)
+def appflowy_add_published_comment(
+    view_id: str, content: str, reply_comment_id: str | None = None
+):
+    """Post a comment on a published view."""
+    ensure_authenticated()
+
+    try:
+        body = client._request(
+            "POST",
+            f"/api/workspace/published-info/{view_id}/comment",
+            json_body={"content": content, "reply_comment_id": reply_comment_id},
+        )
+        return response_data(body)
+    except Exception as e:
+        raise Exception(f"Failed to add published comment: {str(e)}")
+
+
+@mcp.tool(
+    name="appflowy_get_published_reactions",
+    description="List reactions on a published view, optionally filtered to one comment.",
+)
+def appflowy_get_published_reactions(view_id: str, comment_id: str | None = None):
+    """Get reactions on a published view."""
+    ensure_authenticated()
+
+    try:
+        body = client._request(
+            "GET",
+            f"/api/workspace/published-info/{view_id}/reaction",
+            params={"comment_id": comment_id} if comment_id else None,
+        )
+        return response_data(body)
+    except Exception as e:
+        raise Exception(f"Failed to get published reactions: {str(e)}")
+
+
+@mcp.tool(
+    name="appflowy_add_published_reaction",
+    description="Add an emoji reaction to a comment on a published view.",
+)
+def appflowy_add_published_reaction(
+    view_id: str, comment_id: str, reaction_type: str
+):
+    """React to a comment on a published view."""
+    ensure_authenticated()
+
+    try:
+        body = client._request(
+            "POST",
+            f"/api/workspace/published-info/{view_id}/reaction",
+            json_body={"reaction_type": reaction_type, "comment_id": comment_id},
+        )
+        return response_data(body)
+    except Exception as e:
+        raise Exception(f"Failed to add published reaction: {str(e)}")
+
+
 # ==================== WORKSPACE MANAGEMENT TOOLS ====================
 
 @mcp.tool(name="appflowy_create_workspace", description="Create a new workspace.")
@@ -1632,13 +1800,61 @@ def unique_path(path: Path) -> Path:
         counter += 1
 
 
+EXPORT_MAX_WORKERS = 8
+
+
+def _collect_document_views(views: list[dict]) -> list[dict]:
+    """Flatten the tree to the document views (non-space, document layout)."""
+    out: list[dict] = []
+    for view in views:
+        if not view.get("is_space") and view.get("layout", 0) == 0 and view.get("view_id"):
+            out.append(view)
+        out.extend(_collect_document_views(view.get("children") or []))
+    return out
+
+
+def _prefetch_page_markdowns(
+    workspace_id: str, views: list[dict]
+) -> dict[str, str | Exception]:
+    """Fetch every document's Markdown concurrently.
+
+    Export is otherwise one serial round-trip per page; a bounded thread pool
+    turns a large workspace from minutes into seconds. httpx.Client is
+    thread-safe and token refresh is serialized, so sharing the client is fine.
+    """
+    docs = _collect_document_views(views)
+    cache: dict[str, str | Exception] = {}
+    if not docs:
+        return cache
+    workers = min(EXPORT_MAX_WORKERS, len(docs))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {
+            pool.submit(
+                fetch_page_markdown, workspace_id, v["view_id"], v.get("name") or ""
+            ): v["view_id"]
+            for v in docs
+        }
+        for future, view_id in futures.items():
+            try:
+                cache[view_id] = future.result()
+            except Exception as e:  # noqa: BLE001 - recorded per-page as a warning
+                cache[view_id] = e
+    return cache
+
+
 def export_views_to_directory(
     workspace_id: str,
     views: list[dict],
     directory: Path,
     exported: list[str],
     warnings: list[str],
+    cache: dict[str, str | Exception] | None = None,
 ) -> None:
+    # Prefetch all page contents in parallel on the first (top-level) call;
+    # the recursive walk below then just reads from the cache.
+    if cache is None:
+        cache = _prefetch_page_markdowns(workspace_id, views)
+
     for view in views:
         name = view.get("name") or ""
         children = view.get("children") or []
@@ -1653,12 +1869,18 @@ def export_views_to_directory(
 
         markdown = None
         if not view.get("is_space"):
-            try:
-                markdown = fetch_page_markdown(
-                    workspace_id, view["view_id"], title=name
-                )
-            except Exception as e:
-                warnings.append(f"failed to export '{name}': {e}")
+            result = cache.get(view["view_id"])
+            if isinstance(result, Exception):
+                warnings.append(f"failed to export '{name}': {result}")
+            elif result is not None:
+                markdown = result
+            else:
+                try:
+                    markdown = fetch_page_markdown(
+                        workspace_id, view["view_id"], title=name
+                    )
+                except Exception as e:
+                    warnings.append(f"failed to export '{name}': {e}")
 
         if children:
             subdir = unique_path(directory / filename)
@@ -1667,7 +1889,7 @@ def export_views_to_directory(
                 (subdir / "README.md").write_text(markdown, encoding="utf-8")
                 exported.append(str(subdir / "README.md"))
             export_views_to_directory(
-                workspace_id, children, subdir, exported, warnings
+                workspace_id, children, subdir, exported, warnings, cache
             )
         elif markdown is not None:
             target = unique_path(directory / f"{filename}.md")

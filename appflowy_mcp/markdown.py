@@ -11,6 +11,7 @@ INLINE_PATTERN = re.compile(
     r"(?P<italic>\*[^*]+\*)"
 )
 
+HEADING_PATTERN = re.compile(r"^(#{1,6})\s+(.+)$")
 ORDERED_LIST_PATTERN = re.compile(r"^\d+\.\s+(.+)$")
 IMAGE_PATTERN = re.compile(r"^!\[(?P<alt>[^\]]*)\]\((?P<url>[^)]+)\)$")
 INLINE_IMAGE_PATTERN = re.compile(r"!\[(?P<alt>[^\]]*)\]\((?P<url>[^)]+)\)")
@@ -125,14 +126,9 @@ def parse_markdown_to_blocks(
             )
             continue
 
-        if stripped.startswith("### "):
-            blocks.append(_heading_block(3, stripped[4:]))
-            continue
-        if stripped.startswith("## "):
-            blocks.append(_heading_block(2, stripped[3:]))
-            continue
-        if stripped.startswith("# "):
-            blocks.append(_heading_block(1, stripped[2:]))
+        heading = HEADING_PATTERN.match(stripped)
+        if heading:
+            blocks.append(_heading_block(len(heading.group(1)), heading.group(2)))
             continue
 
         if stripped.startswith("- [ ] ") or stripped.startswith("- [x] "):

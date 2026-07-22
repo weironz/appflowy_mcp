@@ -1,3 +1,4 @@
+import threading
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -11,6 +12,27 @@ DEFAULT_BASE_URL = "https://beta.appflowy.cloud"
 # Max row ids per row/detail request, to keep the `ids` query string well under
 # common URL-length limits when a database has many rows.
 ROW_DETAIL_BATCH_SIZE = 100
+
+# Methods safe to auto-retry on a 5xx: the server either didn't apply the
+# request or applying it twice is harmless. POST/PATCH are excluded so a
+# create/append that the server processed before erroring isn't duplicated.
+IDEMPOTENT_METHODS = frozenset({"GET", "HEAD", "PUT", "DELETE", "OPTIONS"})
+
+
+class AppFlowyError(Exception):
+    """An error from the AppFlowy API, preserving HTTP status and error code."""
+
+    def __init__(
+        self, message: str, *, status: int | None = None, code: int | None = None
+    ) -> None:
+        self.status = status
+        self.code = code
+        parts = [message]
+        if code is not None:
+            parts.append(f"code {code}")
+        if status is not None:
+            parts.append(f"HTTP {status}")
+        super().__init__(f"{message} ({', '.join(parts[1:])})" if parts[1:] else message)
 
 
 @dataclass
@@ -56,6 +78,7 @@ class AppFlowyClient:
         self._http_client = httpx.Client(timeout=60.0)
         self._max_retries = 3
         self._backoff_base = 0.5
+        self._reauth_lock = threading.Lock()
 
     def login(self) -> TokenResponse:
         if not self.email or not self.password:
@@ -259,7 +282,9 @@ class AppFlowyClient:
                 json=json_payload,
             )
 
-        return self._handle_response(self._send(build, allow_reauth=allow_reauth))
+        return self._handle_response(
+            self._send(build, method=method, allow_reauth=allow_reauth)
+        )
 
     def _request_content_json(
         self,
@@ -280,47 +305,64 @@ class AppFlowyClient:
                 content=content,
             )
 
-        return self._handle_response(self._send(build, allow_reauth=allow_reauth))
+        return self._handle_response(
+            self._send(build, method=method, allow_reauth=allow_reauth)
+        )
 
-    def _send(self, build, *, allow_reauth: bool) -> httpx.Response:
+    def _send(self, build, *, method: str, allow_reauth: bool) -> httpx.Response:
         """Send a request with one auto-reauth on 401 and backoff on 429/5xx.
 
         `build` must (re)build and send the request each call, reading a fresh
         Authorization header, so a token refreshed mid-flight is picked up.
+        A 429 is retried for any method (the request was rejected, not applied);
+        a 5xx is only retried for idempotent methods to avoid duplicate writes.
         """
+        idempotent = method.upper() in IDEMPOTENT_METHODS
         attempt = 0
         reauthed = False
         while True:
+            token_before = self.token_store.get_access_token()
             response = build()
             status = response.status_code
 
             if status == 401 and allow_reauth and not reauthed:
                 reauthed = True
-                if self._reauthenticate():
+                if self._reauthenticate(token_before):
                     continue
 
-            if (status == 429 or status >= 500) and attempt < self._max_retries:
+            retryable = status == 429 or (status >= 500 and idempotent)
+            if retryable and attempt < self._max_retries:
                 time.sleep(self._retry_delay(response, attempt))
                 attempt += 1
                 continue
 
             return response
 
-    def _reauthenticate(self) -> bool:
-        """Refresh the access token, falling back to a fresh login."""
-        try:
-            if self.token_store.get_refresh_token():
-                self.refresh_token()
-                return True
-        except Exception:
-            pass
-        try:
-            if self.email and self.password:
-                self.login()
-                return True
-        except Exception:
-            pass
-        return False
+    def _reauthenticate(self, token_before: str | None = None) -> bool:
+        """Refresh the access token, falling back to a fresh login.
+
+        Serialized so concurrent 401s don't both spend the rotating refresh
+        token; a thread that finds the token already changed just reuses it.
+        """
+        with self._reauth_lock:
+            if (
+                token_before is not None
+                and self.token_store.get_access_token() != token_before
+            ):
+                return True  # another thread already refreshed
+            try:
+                if self.token_store.get_refresh_token():
+                    self.refresh_token()
+                    return True
+            except Exception:
+                pass
+            try:
+                if self.email and self.password:
+                    self.login()
+                    return True
+            except Exception:
+                pass
+            return False
 
     def _retry_delay(self, response: httpx.Response, attempt: int) -> float:
         retry_after = response.headers.get("retry-after")
@@ -352,18 +394,24 @@ class AppFlowyClient:
             ) from e
 
         if response.status_code >= 400:
-            message = (
-                body.get("message", f"HTTP {response.status_code}")
-                if isinstance(body, dict)
-                else response.text
+            if isinstance(body, dict):
+                raise AppFlowyError(
+                    body.get("message") or f"HTTP {response.status_code}",
+                    status=response.status_code,
+                    code=body.get("code"),
+                )
+            raise AppFlowyError(
+                response.text or f"HTTP {response.status_code}",
+                status=response.status_code,
             )
-            raise Exception(f"{message} (HTTP {response.status_code})")
 
         # AppFlowy returns business errors as HTTP 200 with a non-zero code in
         # the {code, message, data} envelope (e.g. 1026 workspace limit).
         if isinstance(body, dict) and body.get("code") not in (None, 0):
-            raise Exception(
-                f"{body.get('message', 'AppFlowy error')} (code {body['code']})"
+            raise AppFlowyError(
+                body.get("message") or "AppFlowy error",
+                status=response.status_code,
+                code=body["code"],
             )
 
         return body if isinstance(body, dict) else {"data": body}

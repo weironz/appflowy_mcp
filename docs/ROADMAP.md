@@ -4,94 +4,112 @@ Prioritized improvements for `appflowy-mcp` (and the `appflowy-cli` shim),
 distilled from a full code audit of the server plus a gap analysis against the
 AppFlowy-Cloud REST API. Ordered by value / risk, not by area.
 
-Legend: **[ ]** todo · **[~]** in progress · **[x]** done
+Legend: **[ ]** todo · **[~]** partial · **[x]** done
+
+Most of this landed in **0.7.0**. Items marked deferred need live testing
+against a real workspace (they can silently corrupt data or need an external
+upload flow) and were intentionally not shipped un-verified.
 
 ---
 
-## Tier 1 — high value, low risk, fixes problems already hit in the field
+## Tier 1 — high value, low risk
 
-### P1 — Raw collab fetch as an export fallback  **[x]** (shipped 0.6.5)
-- **Problem:** export and `appflowy_get_page` only call `GET /page-view/{id}`,
-  whose handler routes through a lazy `ws_server` path — exactly where the
-  transient/"Collab not found"/empty-document failures come from. Some pages
-  (e.g. the ~19 "unreachable" pages seen exporting the `infrastructure`
-  workspace) never resolve there.
-- **Fix:** AppFlowy exposes `GET /api/workspace/{ws}/collab/{object_id}`
-  (collab_type=Document), which reads `collab_storage.get_full_encode_collab`
-  **directly**, bypassing that path, and returns the same yjs `encoded_collab`
-  the MCP already decodes. Add a client method + an `appflowy_get_collab` tool,
-  and use it as a fallback in `fetch_page_markdown` when page-view yields no
-  content after retries. **May recover pages currently believed lost.**
+### P1 — Raw collab fetch as an export fallback  **[x]** (0.6.5)
+`fetch_collab_markdown` + the `appflowy_get_collab` tool read a document via
+`GET /api/workspace/v1/{ws}/collab/{object_id}`, bypassing the lazy page-view
+path; `fetch_page_markdown` falls back to it. Field result: for the 19
+"unreachable" pages in the `infrastructure` workspace this endpoint *also*
+returns nothing — confirming that content was never synced to the server (not a
+fetch-method problem). The fallback still helps pages that exist server-side but
+transiently fail page-view.
 
-### P2 — Batch collab fetch + parallel export  **[ ]**
-- **Problem:** `export_views_to_directory` fetches one page at a time on a
-  blocking `httpx.Client`; N pages = N serial round-trips → minutes on large
-  workspaces.
-- **Fix:** use `GET/POST /api/workspace/{ws}/collab_list`
-  (`batch_get_collab_handler`) to fetch many collabs per request, and/or a
-  bounded thread pool over the flattened view list. Pairs with P1.
+### P2 — Parallel export  **[x]** (0.7.0)
+`export_views_to_directory` now prefetches every page's Markdown with a bounded
+thread pool (`EXPORT_MAX_WORKERS=8`) and the tree walk reads from that cache.
+Large workspaces go from minutes to seconds.
+- Deferred: the dedicated **batch** endpoint (`/collab_list`). Its response
+  encodes each collab as **bincode-serialized `EncodedCollab` bytes**, not JSON,
+  so decoding it in Python is fragile; the thread pool gets the same win safely.
 
-### Markdown round-trip fidelity  **[ ]**
-- Nested/indented lists are flattened on import (`markdown.py` strips indent)
-  while export renders nesting → export→import collapses hierarchy. Build a
-  block tree by indent depth.
-- Tables are silently dropped both directions. At minimum warn on unhandled
-  block types during export; ideally parse/render GFM tables.
-- Headings h4–h6 not parsed on import (export emits up to 6) → no round-trip.
-- Export does not escape Markdown metacharacters in inline text.
-- Underscore emphasis (`_x_`/`__x__`) and nested inline (e.g. bold link) lost
-  on import.
+### Markdown round-trip fidelity  **[~]** (0.7.0)
+- [x] Headings **h4–h6** now parse on import (`HEADING_PATTERN`); export already
+  emitted up to level 6.
+- [x] Unhandled block types (tables/grids/math) now leave a visible
+  `<!-- unsupported block: TYPE -->` marker on export instead of vanishing.
+- [ ] **Nested/indented lists on import** — deferred: needs the AppFlowy
+  `page_data` block-children contract validated live; a wrong tree could break
+  import. (Export already renders nesting correctly.)
+- [ ] **Inline escaping** of `* _ | [ ] backtick` — deferred: requires a matched
+  unescape on import (this parser has no backslash-escape handling), so shipping
+  export-only escaping would break the round-trip.
+- [ ] **Underscore emphasis** (`_x_` / `__x__`) — deliberately NOT done: the
+  docs are full of `snake_case` identifiers that naive `_..._` would italicize.
+- [ ] Nested inline (e.g. a bold link `**[t](u)**`) — needs a real tokenizer.
 
 ---
 
-## Tier 2 — robustness / correctness
-
-- **Do not auto-retry non-idempotent POSTs on 429/5xx** — `create_row` /
-  `create_page` / `append-block` / `invite_members` could be duplicated.
-  Restrict auto-retry to GET and pre_hash'd PUT.
-- **Serialize token refresh** — concurrent 401s can both refresh; GoTrue rotates
-  refresh tokens, so the second refresh fails and can log the session out. Guard
-  with a lock + re-check inside it.
-- **Typed errors** — 4xx responses drop AppFlowy's numeric `code`; every tool
-  re-wraps as a flat `Exception`. Introduce `AppFlowyError(status, code, msg)`.
-- **Test the HTTP client layer** — reauth-once, backoff/`retry-after`, the
-  "HTTP 200 with non-zero envelope code" business-error path, and row-id
-  batching are all currently untested.
-- Replace the bare `except Exception` retry in `fetch_page_markdown` so real
-  decode bugs aren't masked as transient failures.
+## Tier 2 — robustness / correctness  **[x]** (0.7.0)
+- [x] Auto-retry now restricted to idempotent methods on 5xx (POST/PATCH no
+  longer retried → no duplicate create/append); 429 still retried for all.
+- [x] Token refresh serialized with a lock + re-check, so concurrent 401s
+  (now reachable via the parallel export) can't spend the rotating refresh
+  token twice and log the session out.
+- [x] `AppFlowyError(message, status, code)` preserves the AppFlowy error code
+  for 4xx (and the 200-envelope business errors).
+- [x] The HTTP client layer is now unit-tested (`tests/test_client.py`):
+  idempotent retry, 429 retry, 401 reauth, typed errors, refresh re-check.
 
 ---
 
 ## Tier 3 — new user-facing capabilities
 
-- **Search → summary (RAG answer)** — `GET /api/search/{ws}/summary` turns the
-  existing search results into a cited natural-language answer over the user's
-  own notes. `appflowy_search_summary(ws, query)`.
-- **Import AppFlowy native `.zip`** — `POST /api/import` (+ `create` / detail
-  polling) ingests AppFlowy's own export, preserving databases/boards/relations
-  that Markdown import flattens.
-- **Duplicate a published page/template** — `POST /.../published-duplicate`.
-- **Comments & reactions on published pages** —
-  `/.../published-info/{view_id}/comment` and `/reaction`.
-- **Incremental export** — skip views whose `last_edited_time` predates the
-  existing file's mtime; today export requires an empty destination.
+- [x] **P3 — Search → summary** (0.7.0): `appflowy_search_summary` runs a
+  document search then `GET /api/search/{ws}/summary`, returning cited summaries.
+- [x] **P5 — Duplicate a published page/template** (0.7.0):
+  `appflowy_duplicate_published_page` (`POST /.../published-duplicate`).
+- [x] **P6 — Comments & reactions on published views** (0.7.0): get/add tools
+  for both (`appflowy_get_published_comments` / `_add_published_comment` /
+  `_get_published_reactions` / `_add_published_reaction`). Delete endpoints exist
+  but are intentionally not exposed (destructive; add on request).
+- [x] **P7 — Published outline** (0.7.0): `appflowy_get_published_outline`
+  (`GET /api/workspace/published-outline/{namespace}`, public).
+- [ ] **P4 — Import AppFlowy native `.zip`** — deferred (see research below).
+- [ ] Incremental / skip-unchanged export (by `last_edited_time`).
 
 ---
 
-## Tier 4 — stretch (biggest feature ceiling)
+## Tier 4 — stretch
 
-- **Edit existing document content** — `POST /.../collab/{id}/web-update` applies
-  arbitrary yjs updates (modify / reorder / delete blocks). The MCP can only
-  *append* today. Feasible since `pycrdt` is already a dependency, but requires
-  constructing yjs updates client-side. Large effort.
+### P8 — Edit existing document content — researched, **deferred**
+Endpoint verified: `POST /api/workspace/v1/{ws}/collab/{object_id}/web-update`,
+body `{ "doc_state": [<int bytes of a raw yjs update>], "collab_type": 0 }`.
+Feasibility: **technically possible** — `pycrdt` is already a dependency, so one
+can load the current document (from the collab endpoint's `doc_state`), mutate
+the CRDT, and emit a yjs update. Risk: the update must encode a *valid* mutation
+in AppFlowy's exact document schema (blocks / text_map / children_map maps); a
+malformed update merged server-side can corrupt the document. This needs careful
+live testing and a rollback story before shipping — **not done blind.** This is
+the only true feature ceiling (the server is otherwise append-only via
+`append-block`).
 
 ---
 
-## Notes
+## Research notes
 
-- Non-gaps confirmed during analysis: `appflowy_update_page` already covers the
-  dedicated update-name/icon/extra endpoints; `appflowy_search` already matches
-  the search DTO exactly (only the `/summary` companion is missing);
-  `get_database_row_details` is already chunked to bound URL length.
-- Known limitation to document: MDX/Docusaurus constructs (`:::note`
-  admonitions, `<Tabs>`) and inline HTML pass through as literal paragraph text.
+### P4 native import flow (verified, why it's deferred)
+Not one call — a multi-step async flow:
+1. `POST /api/import/create` `{ workspace_name, content_length }` → returns
+   `{ task_id, presigned_url }` (creates a new empty workspace + a 10-min S3 URL).
+2. Client **PUTs the raw zip to the presigned S3 URL** directly (out-of-band).
+3. Poll `GET /api/import` → `{ tasks: [{ task_id, status, ... }], has_more }`;
+   `status` is a numeric enum; a background worker does the actual import.
+   (Alt path: `POST /api/import` multipart with `X-Content-Length` +
+   `X-Content-MD5` headers, no task_id returned.) Max 3 pending tasks/user.
+Deferred because the presigned-S3 PUT / MD5 handling and async polling can't be
+verified offline and shouldn't ship un-tested.
+
+### Contract gotchas (for future work)
+- `CollabType` serializes as an **integer** (`Document=0`), not a string.
+- Batch collab (`/collab_list`) returns **bincode** bytes, not JSON.
+- `web-update` `doc_state` is an **int array of a raw yjs update**, not base64.
+- `search/{ws}/summary` and `collab_list` (GET) both take a **JSON body on GET**.
