@@ -1513,8 +1513,8 @@ def fetch_page_markdown(
     view_id: str,
     title: str | None,
     *,
-    retries: int = 4,
-    backoff: float = 0.5,
+    retries: int = 2,
+    backoff: float = 0.4,
 ) -> str:
     # AppFlowy serves document collabs lazily, so under a large export a page
     # that actually has content can transiently 404 ("Collab not found") or
