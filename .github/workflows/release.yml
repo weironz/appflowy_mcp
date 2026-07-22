@@ -1,13 +1,14 @@
 name: Release
 
-# Cut a release by bumping the version in pyproject.toml, committing, then
-# pushing a matching tag:
+# One release covers both packages. Bump appflowy-mcp/pyproject.toml (and
+# appflowy-cli/pyproject.toml when the CLI changed), commit, then push a tag
+# matching the appflowy-mcp version:
 #
-#   git tag v0.6.3 && git push origin v0.6.3
+#   git tag v0.6.4 && git push origin main --tags
 #
-# This workflow verifies the tag matches the package version, runs the tests,
-# builds the sdist + wheel, publishes to PyPI via Trusted Publishing (OIDC, no
-# stored token), and creates a GitHub Release with the artifacts attached.
+# The workflow verifies the tag matches appflowy-mcp, runs the tests, builds
+# both packages, publishes appflowy-mcp to PyPI (and appflowy-cli too when its
+# version is new), and creates a single GitHub Release with all the artifacts.
 
 on:
   push:
@@ -33,24 +34,35 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v6
 
-      - name: Verify tag matches package version
+      - name: Verify tag matches appflowy-mcp version
         run: |
           tag="${GITHUB_REF_NAME#v}"
           version="$(uv version --short)"
-          echo "tag=$tag package_version=$version"
+          echo "tag=$tag appflowy-mcp=$version"
           if [ "$tag" != "$version" ]; then
-            echo "::error::Tag v$tag does not match pyproject version $version"
+            echo "::error::Tag v$tag does not match appflowy-mcp version $version"
             exit 1
           fi
 
       - name: Run tests
         run: uv run --with pytest pytest -q
 
-      - name: Build sdist and wheel
-        run: uv build
+      - name: Build both packages
+        run: |
+          uv build -o dist
+          (cd appflowy-cli && uv build -o ../dist)
 
-      - name: Publish to PyPI (Trusted Publishing)
-        run: uv publish
+      - name: Publish appflowy-mcp to PyPI
+        run: uv publish dist/appflowy_mcp-*
+
+      - name: Publish appflowy-cli to PyPI (only when its version is new)
+        run: |
+          cli_version="$(cd appflowy-cli && uv version --short)"
+          if curl -sf -o /dev/null "https://pypi.org/pypi/appflowy-cli/${cli_version}/json"; then
+            echo "appflowy-cli ${cli_version} already on PyPI - skipping publish"
+          else
+            uv publish dist/appflowy_cli-*
+          fi
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
