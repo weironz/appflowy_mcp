@@ -148,3 +148,53 @@ def test_markdown_body_is_empty():
     assert server._markdown_body_is_empty("# 概述", "概述") is True
     assert server._markdown_body_is_empty("# 概述\n", "概述") is True
     assert server._markdown_body_is_empty("# 概述\n\ncontent", "概述") is False
+
+
+def test_encoded_collab_bytes_shapes():
+    import base64
+    from appflowy_mcp import server
+
+    assert server._encoded_collab_bytes([1, 2, 3]) == [1, 2, 3]
+    assert server._encoded_collab_bytes({"doc_state": [4, 5]}) == [4, 5]
+    b64 = base64.b64encode(bytes([6, 7])).decode()
+    assert server._encoded_collab_bytes(b64) == [6, 7]
+    assert server._encoded_collab_bytes({"doc_state": b64}) == [6, 7]
+    assert server._encoded_collab_bytes(None) is None
+    assert server._encoded_collab_bytes([]) is None
+
+
+def test_fetch_collab_markdown_tries_both_collab_types(monkeypatch):
+    from appflowy_mcp import server
+
+    seen = []
+
+    def fake_request(method, path, params=None, json_body=None):
+        seen.append(params.get("collab_type"))
+        if params.get("collab_type") == 0:
+            raise Exception("invalid collab_type")
+        return {"data": {"encode_collab": {"doc_state": [9]}}}
+
+    monkeypatch.setattr(server.client, "_request", fake_request)
+    monkeypatch.setattr(server, "decode_document", lambda e: {})
+    monkeypatch.setattr(server, "document_to_markdown", lambda d, title=None: f"# {title}\n\nx")
+
+    out = server.fetch_collab_markdown("ws", "oid", "T")
+    assert out == "# T\n\nx"
+    assert seen == [0, "Document"]
+
+
+def test_page_markdown_falls_back_to_collab(monkeypatch):
+    from appflowy_mcp import server
+
+    def fake_request(method, path, params=None, json_body=None):
+        if "page-view" in path:
+            raise Exception("Record not found:Collab not found (code -2)")
+        return {"data": {"encode_collab": {"doc_state": [1, 2, 3]}}}
+
+    monkeypatch.setattr(server.client, "_request", fake_request)
+    monkeypatch.setattr(server, "decode_document", lambda e: {})
+    monkeypatch.setattr(server, "document_to_markdown", lambda d, title=None: f"# {title}\n\nrecovered")
+    monkeypatch.setattr(server.time, "sleep", lambda *a, **k: None)
+
+    out = server.fetch_page_markdown("ws", "vid", "T")
+    assert out == "# T\n\nrecovered"

@@ -10,7 +10,7 @@ Legend: **[ ]** todo · **[~]** in progress · **[x]** done
 
 ## Tier 1 — high value, low risk, fixes problems already hit in the field
 
-### P1 — Raw collab fetch as an export fallback  **[~]**
+### P1 — Raw collab fetch as an export fallback  **[x]** (shipped 0.6.5)
 - **Problem:** export and `appflowy_get_page` only call `GET /page-view/{id}`,
   whose handler routes through a lazy `ws_server` path — exactly where the
   transient/"Collab not found"/empty-document failures come from. Some pages

@@ -1,3 +1,4 @@
+import base64
 import mimetypes
 import os
 import time
@@ -412,6 +413,27 @@ def appflowy_get_page(workspace_id: str, page_id: str):
         return response_data(body)
     except Exception as e:
         raise Exception(f"Failed to get page: {str(e)}")
+
+
+@mcp.tool(
+    name="appflowy_get_collab",
+    description=(
+        "Get a document's content as Markdown via the raw collab endpoint. This "
+        "reads collab storage directly, bypassing the lazy page-view path, so it "
+        "can recover pages that appflowy_get_page / export report as 'Collab not "
+        "found' or return empty."
+    ),
+)
+def appflowy_get_collab(workspace_id: str, page_id: str, title: str | None = None):
+    """Fetch document content via the raw collab endpoint, as Markdown."""
+    ensure_authenticated()
+
+    markdown = fetch_collab_markdown(workspace_id, page_id, title)
+    if markdown is None:
+        raise Exception(
+            "Could not fetch collab content for this object (no document collab)."
+        )
+    return {"object_id": page_id, "markdown": markdown}
 
 
 @mcp.tool(name="appflowy_update_page", description="Update a page name, icon, lock state, or extra metadata.")
@@ -1508,6 +1530,54 @@ def _markdown_body_is_empty(markdown: str, title: str | None) -> bool:
     return not text.strip()
 
 
+def _encoded_collab_bytes(value) -> list[int] | None:
+    """Normalize an encoded-collab payload to a list of byte values.
+
+    The page-view endpoint returns the raw yjs update as a list of ints, while
+    the raw-collab endpoint wraps it as EncodedCollab {state_vector, doc_state};
+    doc_state may itself be a list of ints or a base64 string.
+    """
+    if isinstance(value, dict):
+        value = value.get("doc_state") or value.get("encoded_collab_v1")
+    if isinstance(value, str):
+        try:
+            return list(base64.b64decode(value))
+        except Exception:
+            return None
+    if isinstance(value, (list, bytes, bytearray)):
+        return list(value) or None
+    return None
+
+
+def fetch_collab_markdown(
+    workspace_id: str, object_id: str, title: str | None
+) -> str | None:
+    """Fetch a document via the raw collab endpoint, or None if unavailable.
+
+    ``GET /api/workspace/v1/{ws}/collab/{object_id}`` reads collab storage
+    directly, bypassing the lazy page-view path where "Collab not found" and
+    empty-document transients originate — so it can reach pages page-view can't.
+    collab_type for a document is tried as both the numeric and named form.
+    """
+    for collab_type in (0, "Document"):
+        try:
+            body = client._request(
+                "GET",
+                f"/api/workspace/v1/{workspace_id}/collab/{object_id}",
+                params={"collab_type": collab_type},
+            )
+            data = response_data(body)
+            encoded = _encoded_collab_bytes(
+                data.get("encode_collab") or data.get("encoded_collab")
+            )
+            if not encoded:
+                continue
+            return document_to_markdown(decode_document(encoded), title=title)
+        except Exception:
+            continue
+    return None
+
+
 def fetch_page_markdown(
     workspace_id: str,
     view_id: str,
@@ -1518,10 +1588,11 @@ def fetch_page_markdown(
 ) -> str:
     # AppFlowy serves document collabs lazily, so under a large export a page
     # that actually has content can transiently 404 ("Collab not found") or
-    # return an empty document. Retry both before giving up; a genuinely empty
-    # page just returns its title after the retries are exhausted.
+    # return an empty document. Retry both; if page-view still can't produce
+    # content, fall back to the raw collab endpoint, which bypasses that path.
+    page_markdown: str | None = None
+    page_error: Exception | None = None
     for attempt in range(retries + 1):
-        last = attempt == retries
         try:
             body = client._request(
                 "GET", f"/api/workspace/{workspace_id}/page-view/{view_id}"
@@ -1529,16 +1600,24 @@ def fetch_page_markdown(
             encoded = response_data(body).get("data", {}).get("encoded_collab")
             if not encoded:
                 raise Exception("Page response did not include encoded_collab.")
-            markdown = document_to_markdown(decode_document(encoded), title=title)
-            if not last and _markdown_body_is_empty(markdown, title):
-                time.sleep(backoff * (2**attempt))
-                continue
-            return markdown
-        except Exception:
-            if last:
-                raise
+            page_markdown = document_to_markdown(decode_document(encoded), title=title)
+            page_error = None
+            if not _markdown_body_is_empty(page_markdown, title):
+                return page_markdown
+        except Exception as e:
+            page_error = e
+        if attempt < retries:
             time.sleep(backoff * (2**attempt))
-    raise Exception("unreachable")
+
+    # page-view exhausted (empty or failing) -> try the raw collab endpoint.
+    fallback = fetch_collab_markdown(workspace_id, view_id, title)
+    if fallback is not None and not _markdown_body_is_empty(fallback, title):
+        return fallback
+    if page_markdown is not None:
+        return page_markdown  # genuinely empty page
+    if fallback is not None:
+        return fallback
+    raise page_error or Exception(f"Could not fetch page {view_id}")
 
 
 def unique_path(path: Path) -> Path:
