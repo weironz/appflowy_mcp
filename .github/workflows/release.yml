@@ -1,0 +1,59 @@
+name: Release
+
+# Cut a release by bumping the version in pyproject.toml, committing, then
+# pushing a matching tag:
+#
+#   git tag v0.6.3 && git push origin v0.6.3
+#
+# This workflow verifies the tag matches the package version, runs the tests,
+# builds the sdist + wheel, publishes to PyPI via Trusted Publishing (OIDC, no
+# stored token), and creates a GitHub Release with the artifacts attached.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write # create the GitHub Release
+  id-token: write # PyPI Trusted Publishing (OIDC)
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Verify tag matches package version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          version="$(uv version --short)"
+          echo "tag=$tag package_version=$version"
+          if [ "$tag" != "$version" ]; then
+            echo "::error::Tag v$tag does not match pyproject version $version"
+            exit 1
+          fi
+
+      - name: Run tests
+        run: uv run --with pytest pytest -q
+
+      - name: Build sdist and wheel
+        run: uv build
+
+      - name: Publish to PyPI (Trusted Publishing)
+        run: uv publish
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
