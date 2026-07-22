@@ -58,5 +58,7 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: appflowy-cli/dist/*
+          files: |
+            appflowy-cli/dist/*.whl
+            appflowy-cli/dist/*.tar.gz
           generate_release_notes: true
