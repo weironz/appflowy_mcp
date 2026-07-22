@@ -95,3 +95,56 @@ def test_sanitize_filename():
     assert sanitize_filename('a/b:c*d?"e"', "fb") == 'a-b-c-d--e-'
     assert sanitize_filename("", "fb") == "fb"
     assert sanitize_filename("...", "fb") == "fb"
+
+
+def test_fetch_page_markdown_retries_on_collab_not_found(monkeypatch):
+    """A transient 'Collab not found' is retried, not dropped."""
+    from appflowy_mcp import server
+
+    calls = {"n": 0}
+
+    def fake_request(method, path):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise Exception("Record not found:Collab not found (code -2)")
+        return {"data": {"data": {"encoded_collab": [1, 2, 3]}}}
+
+    monkeypatch.setattr(server.client, "_request", fake_request)
+    monkeypatch.setattr(server, "decode_document", lambda e: {})
+    monkeypatch.setattr(server, "document_to_markdown", lambda d, title=None: f"# {title}\n\nbody")
+    monkeypatch.setattr(server.time, "sleep", lambda *a, **k: None)
+
+    out = server.fetch_page_markdown("ws", "vid", "T")
+    assert out == "# T\n\nbody"
+    assert calls["n"] == 3
+
+
+def test_fetch_page_markdown_retries_on_empty_body(monkeypatch):
+    """A page that transiently decodes to only its title is retried."""
+    from appflowy_mcp import server
+
+    calls = {"n": 0}
+
+    def fake_request(method, path):
+        calls["n"] += 1
+        return {"data": {"data": {"encoded_collab": [1]}}}
+
+    def fake_md(d, title=None):
+        return f"# {title}" if calls["n"] < 3 else f"# {title}\n\nbody"
+
+    monkeypatch.setattr(server.client, "_request", fake_request)
+    monkeypatch.setattr(server, "decode_document", lambda e: {})
+    monkeypatch.setattr(server, "document_to_markdown", fake_md)
+    monkeypatch.setattr(server.time, "sleep", lambda *a, **k: None)
+
+    out = server.fetch_page_markdown("ws", "vid", "T")
+    assert "body" in out
+    assert calls["n"] == 3
+
+
+def test_markdown_body_is_empty():
+    from appflowy_mcp import server
+
+    assert server._markdown_body_is_empty("# 概述", "概述") is True
+    assert server._markdown_body_is_empty("# 概述\n", "概述") is True
+    assert server._markdown_body_is_empty("# 概述\n\ncontent", "概述") is False

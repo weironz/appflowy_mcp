@@ -1,5 +1,6 @@
 import mimetypes
 import os
+import time
 import uuid
 from pathlib import Path
 
@@ -1493,14 +1494,51 @@ def appflowy_upload_file(workspace_id: str, request: UploadFileRequest):
 # the page-view endpoint's encoded_collab is a raw yjs update, decoded
 # with pycrdt to keep inline formatting that collab/json flattens.
 
-def fetch_page_markdown(workspace_id: str, view_id: str, title: str | None) -> str:
-    body = client._request(
-        "GET", f"/api/workspace/{workspace_id}/page-view/{view_id}"
-    )
-    encoded = response_data(body).get("data", {}).get("encoded_collab")
-    if not encoded:
-        raise Exception("Page response did not include encoded_collab.")
-    return document_to_markdown(decode_document(encoded), title=title)
+def _markdown_body_is_empty(markdown: str, title: str | None) -> bool:
+    """True if the rendered Markdown has only its title heading, no body.
+
+    AppFlowy loads document collabs lazily; under bulk load a content page can
+    momentarily come back with an empty document that renders to just its title.
+    """
+    text = markdown.strip()
+    if title:
+        heading = f"# {title}".strip()
+        if text.startswith(heading):
+            text = text[len(heading):]
+    return not text.strip()
+
+
+def fetch_page_markdown(
+    workspace_id: str,
+    view_id: str,
+    title: str | None,
+    *,
+    retries: int = 4,
+    backoff: float = 0.5,
+) -> str:
+    # AppFlowy serves document collabs lazily, so under a large export a page
+    # that actually has content can transiently 404 ("Collab not found") or
+    # return an empty document. Retry both before giving up; a genuinely empty
+    # page just returns its title after the retries are exhausted.
+    for attempt in range(retries + 1):
+        last = attempt == retries
+        try:
+            body = client._request(
+                "GET", f"/api/workspace/{workspace_id}/page-view/{view_id}"
+            )
+            encoded = response_data(body).get("data", {}).get("encoded_collab")
+            if not encoded:
+                raise Exception("Page response did not include encoded_collab.")
+            markdown = document_to_markdown(decode_document(encoded), title=title)
+            if not last and _markdown_body_is_empty(markdown, title):
+                time.sleep(backoff * (2**attempt))
+                continue
+            return markdown
+        except Exception:
+            if last:
+                raise
+            time.sleep(backoff * (2**attempt))
+    raise Exception("unreachable")
 
 
 def unique_path(path: Path) -> Path:
