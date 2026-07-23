@@ -256,3 +256,11 @@ def test_simple_table_rendered_as_gfm():
 def test_math_equation_rendered():
     out = document_to_markdown(make_document([("math_equation", {"formula": "E=mc^2"}, None, [])]))
     assert "$$" in out and "E=mc^2" in out
+
+
+def test_sanitize_filename_strips_control_chars():
+    from appflowy_mcp.export import sanitize_filename
+    assert sanitize_filename("LLM\r-标准版", "fb") == "LLM-标准版"
+    assert sanitize_filename("a/b:c*d", "fb") == "a-b-c-d"
+    assert sanitize_filename("\r\n\t", "fb") == "fb"
+    assert sanitize_filename("", "fb") == "fb"

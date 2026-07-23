@@ -1883,18 +1883,28 @@ def export_views_to_directory(
                     warnings.append(f"failed to export '{name}': {e}")
 
         if children:
-            subdir = unique_path(directory / filename)
-            subdir.mkdir(parents=True)
+            try:
+                subdir = unique_path(directory / filename)
+                subdir.mkdir(parents=True)
+            except OSError as e:
+                warnings.append(f"failed to create folder for '{name}': {e}")
+                continue
             if markdown is not None:
-                (subdir / "README.md").write_text(markdown, encoding="utf-8")
-                exported.append(str(subdir / "README.md"))
+                try:
+                    (subdir / "README.md").write_text(markdown, encoding="utf-8")
+                    exported.append(str(subdir / "README.md"))
+                except OSError as e:
+                    warnings.append(f"failed to write '{name}/README.md': {e}")
             export_views_to_directory(
                 workspace_id, children, subdir, exported, warnings, cache
             )
         elif markdown is not None:
-            target = unique_path(directory / f"{filename}.md")
-            target.write_text(markdown, encoding="utf-8")
-            exported.append(str(target))
+            try:
+                target = unique_path(directory / f"{filename}.md")
+                target.write_text(markdown, encoding="utf-8")
+                exported.append(str(target))
+            except OSError as e:
+                warnings.append(f"failed to write '{name}.md': {e}")
 
 
 @mcp.tool(

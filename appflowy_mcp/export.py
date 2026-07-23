@@ -236,7 +236,11 @@ def document_to_markdown(document: dict[str, Any], title: str | None = None) -> 
 
 
 def sanitize_filename(name: str, fallback: str) -> str:
+    # Drop control chars (\r \n \t ...) — a title containing one produces an
+    # invalid path and would otherwise crash the whole export (OSError 22).
     cleaned = "".join(
-        "-" if ch in '/\\:*?"<>|' else ch for ch in (name or "")
+        "-" if ch in '/\\:*?"<>|' else ch
+        for ch in (name or "")
+        if ord(ch) >= 32
     ).strip().strip(".")
     return cleaned or fallback
