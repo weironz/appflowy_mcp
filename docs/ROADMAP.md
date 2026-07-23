@@ -34,8 +34,11 @@ Large workspaces go from minutes to seconds.
 ### Markdown round-trip fidelity  **[~]** (0.7.0)
 - [x] Headings **h4–h6** now parse on import (`HEADING_PATTERN`); export already
   emitted up to level 6.
-- [x] Unhandled block types (tables/grids/math) now leave a visible
-  `<!-- unsupported block: TYPE -->` marker on export instead of vanishing.
+- [x] **Tables** (`simple_table`) now render as GFM tables on export (0.7.1),
+  and math equations as `$$...$$`. Verified against a real page. Previously a
+  workspace could silently lose hundreds of tables on every export.
+- [x] Any remaining unhandled block type leaves a visible
+  `<!-- unsupported block: TYPE -->` marker instead of vanishing.
 - [ ] **Nested/indented lists on import** — deferred: needs the AppFlowy
   `page_data` block-children contract validated live; a wrong tree could break
   import. (Export already renders nesting correctly.)

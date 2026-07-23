@@ -237,3 +237,22 @@ def test_export_prefetches_and_writes(tmp_path, monkeypatch):
     names = sorted(p.name for p in tmp_path.rglob("*.md"))
     assert names == ["Doc1.md", "Doc2.md", "README.md"]
     assert warnings == []
+
+
+def test_simple_table_rendered_as_gfm():
+    def cell(t):
+        return ("simple_table_cell", {}, None, [("paragraph", {}, [{"insert": t}], [])])
+    table = ("simple_table", {}, None, [
+        ("simple_table_row", {}, None, [cell("A"), cell("B")]),
+        ("simple_table_row", {}, None, [cell("1"), cell("2")]),
+    ])
+    out = document_to_markdown(make_document([table]))
+    assert "| A | B |" in out
+    assert "| --- | --- |" in out
+    assert "| 1 | 2 |" in out
+    assert "unsupported block" not in out
+
+
+def test_math_equation_rendered():
+    out = document_to_markdown(make_document([("math_equation", {"formula": "E=mc^2"}, None, [])]))
+    assert "$$" in out and "E=mc^2" in out

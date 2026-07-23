@@ -87,6 +87,50 @@ def delta_to_markdown(delta: list[dict[str, Any]]) -> str:
     return "".join(parts)
 
 
+def _render_simple_table(table_block, blocks, children_map, block_text) -> list[str]:
+    """Render an AppFlowy simple_table (table -> rows -> cells) as a GFM table.
+
+    Returns un-prefixed Markdown lines; the first row is treated as the header.
+    Each cell's text is its content blocks' text joined, with pipes/newlines
+    neutralized so they don't break the table.
+    """
+    rows: list[list[str]] = []
+    for row_id in children_map.get(table_block.get("children", ""), []):
+        row = blocks.get(row_id)
+        if not row or row.get("ty") != "simple_table_row":
+            continue
+        cells: list[str] = []
+        for cell_id in children_map.get(row.get("children", ""), []):
+            cell = blocks.get(cell_id)
+            if not cell:
+                continue
+            parts: list[str] = []
+            own = block_text(cell)
+            if own:
+                parts.append(own)
+            for content_id in children_map.get(cell.get("children", ""), []):
+                content = blocks.get(content_id)
+                if content:
+                    piece = block_text(content)
+                    if piece:
+                        parts.append(piece)
+            text = " ".join(parts).replace("|", "\\|").replace("\n", " ").strip()
+            cells.append(text)
+        rows.append(cells)
+
+    ncols = max((len(r) for r in rows), default=0)
+    if not rows or ncols == 0:
+        return []
+
+    def fmt(cells: list[str]) -> str:
+        padded = (cells + [""] * ncols)[:ncols]
+        return "| " + " | ".join(padded) + " |"
+
+    out = [fmt(rows[0]), "| " + " | ".join(["---"] * ncols) + " |"]
+    out.extend(fmt(r) for r in rows[1:])
+    return out
+
+
 def document_to_markdown(document: dict[str, Any], title: str | None = None) -> str:
     """Render a decoded AppFlowy document as Markdown."""
     blocks = document["blocks"]
@@ -143,6 +187,17 @@ def document_to_markdown(document: dict[str, Any], title: str | None = None) -> 
                 icon = data.get("icon")
                 callout = f"{icon} {text}".strip() if icon else text
                 lines.extend([f"{prefix}> {callout}", ""])
+            elif ty == "simple_table":
+                table = _render_simple_table(block, blocks, children_map, block_text)
+                if table:
+                    lines.extend([prefix + row for row in table] + [""])
+                else:
+                    lines.extend([f"{prefix}<!-- unsupported block: {ty} -->", ""])
+                continue  # rows/cells consumed here; skip generic child recursion
+            elif ty == "math_equation":
+                formula = (data.get("formula") or text or "").strip()
+                if formula:
+                    lines.extend([f"{prefix}$$", formula, "$$", ""])
             elif ty == "page":
                 pass  # root container; children rendered below
             elif text:
