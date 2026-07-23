@@ -8,6 +8,10 @@ from appflowy_mcp.export import (
 from appflowy_mcp.markdown import parse_markdown_to_blocks
 
 
+def _types(blocks):
+    return [block["type"] for block in blocks]
+
+
 def make_document(block_specs):
     """Build a decoded-document dict from (ty, data, text_delta, children) specs."""
     blocks = {"root": {"ty": "page", "data": {}, "children": "c_root",
@@ -264,3 +268,137 @@ def test_sanitize_filename_strips_control_chars():
     assert sanitize_filename("a/b:c*d", "fb") == "a-b-c-d"
     assert sanitize_filename("\r\n\t", "fb") == "fb"
     assert sanitize_filename("", "fb") == "fb"
+
+
+def test_front_matter_stripped():
+    content = "---\ntitle: Foo\nsidebar_position: 2\n---\n# Body"
+    blocks = parse_markdown_to_blocks(content)
+    assert _types(blocks) == ["heading"]
+    assert blocks[0]["data"]["delta"] == [{"insert": "Body"}]
+
+def test_front_matter_without_close_is_divider():
+    content = "---\nnot front matter\n"
+    blocks = parse_markdown_to_blocks(content)
+    assert blocks[0]["type"] == "divider"
+
+
+# --- 2. GFM tables ---
+
+def test_mid_document_dashes_still_divider():
+    content = "# Body\n\nsome text\n\n---\n\nmore text"
+    blocks = parse_markdown_to_blocks(content)
+    assert "divider" in _types(blocks)
+    # No front matter was stripped: the heading text survives.
+    assert blocks[0]["data"]["delta"] == [{"insert": "Body"}]
+
+def test_gfm_table_to_simple_table():
+    content = "| Name | Age |\n| --- | --- |\n| Alice | 30 |\n| Bob | 25 |"
+    blocks = parse_markdown_to_blocks(content)
+    assert len(blocks) == 1
+    table = blocks[0]
+    assert table["type"] == "simple_table"
+    assert table["data"]["enable_header_row"] is True
+    assert table["data"]["enable_header_column"] is False
+    assert table["data"]["column_widths"] == {"0": 150, "1": 150}
+    assert len(table["data"]["column_widths"]) == 2
+
+    rows = table["children"]
+    assert _types(rows) == ["simple_table_row"] * 3
+
+    header_cells = rows[0]["children"]
+    assert _types(header_cells) == ["simple_table_cell", "simple_table_cell"]
+    assert header_cells[0]["children"][0]["type"] == "paragraph"
+    assert header_cells[0]["children"][0]["data"]["delta"] == [{"insert": "Name"}]
+    assert header_cells[1]["children"][0]["data"]["delta"] == [{"insert": "Age"}]
+
+    alice = rows[1]["children"]
+    assert alice[0]["children"][0]["data"]["delta"] == [{"insert": "Alice"}]
+    assert alice[1]["children"][0]["data"]["delta"] == [{"insert": "30"}]
+
+def test_table_alignment_separators_and_padding():
+    content = "| a | b | c |\n|:--|:-:|--:|\n| 1 | 2 |"
+    blocks = parse_markdown_to_blocks(content)
+    table = blocks[0]
+    assert table["data"]["column_widths"] == {"0": 150, "1": 150, "2": 150}
+    short_row = table["children"][1]["children"]
+    # Row had 2 cells, padded to 3.
+    assert len(short_row) == 3
+    assert short_row[2]["children"][0]["data"]["delta"] == [{"insert": ""}]
+
+def test_table_escaped_pipe():
+    content = "| a | b |\n| --- | --- |\n| x \\| y | z |"
+    blocks = parse_markdown_to_blocks(content)
+    cell = blocks[0]["children"][1]["children"][0]
+    assert cell["children"][0]["data"]["delta"] == [{"insert": "x | y"}]
+
+def test_lone_dashes_not_table():
+    # A separator-looking line with no preceding header row is just a divider.
+    blocks = parse_markdown_to_blocks("text\n\n---\n\nmore")
+    assert "simple_table" not in _types(blocks)
+    assert "divider" in _types(blocks)
+
+
+# --- 3. nested lists ---
+
+def test_nested_bulleted_list():
+    content = "- a\n  - b\n  - c\n- d"
+    blocks = parse_markdown_to_blocks(content)
+    assert _types(blocks) == ["bulleted_list", "bulleted_list"]
+    parent = blocks[0]
+    assert "children" in parent
+    assert _types(parent["children"]) == ["bulleted_list", "bulleted_list"]
+    assert parent["children"][0]["data"]["delta"] == [{"insert": "b"}]
+    assert parent["children"][1]["data"]["delta"] == [{"insert": "c"}]
+    assert "children" not in blocks[1]
+
+def test_deep_and_mixed_nesting():
+    content = "- a\n  1. b\n    - c\n- d"
+    blocks = parse_markdown_to_blocks(content)
+    assert len(blocks) == 2
+    a = blocks[0]
+    assert a["children"][0]["type"] == "numbered_list"
+    b = a["children"][0]
+    assert b["children"][0]["type"] == "bulleted_list"
+    assert b["children"][0]["data"]["delta"] == [{"insert": "c"}]
+
+def test_non_list_line_ends_nesting():
+    content = "- a\n  - b\n\n# Heading\n\n- x\n  - y"
+    blocks = parse_markdown_to_blocks(content)
+    # After the heading, a fresh list starts; the second list's child is not
+    # attached to the first list.
+    first_list = blocks[0]
+    assert first_list["children"][0]["data"]["delta"] == [{"insert": "b"}]
+    # There are exactly two top-level bulleted_list blocks (one per list).
+    top_lists = [b for b in blocks if b["type"] == "bulleted_list"]
+    assert len(top_lists) == 2
+    second_list = top_lists[1]
+    assert second_list["data"]["delta"] == [{"insert": "x"}]
+    assert second_list["children"][0]["data"]["delta"] == [{"insert": "y"}]
+
+
+# --- 4. math ---
+
+def test_flat_bulleted_list_not_nested():
+    blocks = parse_markdown_to_blocks("- a\n- b\n- c")
+    assert _types(blocks) == ["bulleted_list"] * 3
+    for block in blocks:
+        assert "children" not in block
+
+def test_math_block_fenced():
+    content = "$$\na^2 + b^2 = c^2\n$$"
+    blocks = parse_markdown_to_blocks(content)
+    assert len(blocks) == 1
+    assert blocks[0]["type"] == "math_equation"
+    assert blocks[0]["data"]["formula"] == "a^2 + b^2 = c^2"
+
+def test_math_block_multiline():
+    content = "$$\nx = 1\ny = 2\n$$"
+    blocks = parse_markdown_to_blocks(content)
+    assert blocks[0]["data"]["formula"] == "x = 1\ny = 2"
+
+def test_math_inline_single_line():
+    content = "$$E = mc^2$$"
+    blocks = parse_markdown_to_blocks(content)
+    assert len(blocks) == 1
+    assert blocks[0]["type"] == "math_equation"
+    assert blocks[0]["data"]["formula"] == "E = mc^2"

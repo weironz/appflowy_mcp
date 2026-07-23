@@ -39,12 +39,16 @@ Large workspaces go from minutes to seconds.
   workspace could silently lose hundreds of tables on every export.
 - [x] Any remaining unhandled block type leaves a visible
   `<!-- unsupported block: TYPE -->` marker instead of vanishing.
-- [ ] **Nested/indented lists on import** — deferred: needs the AppFlowy
-  `page_data` block-children contract validated live; a wrong tree could break
-  import. (Export already renders nesting correctly.)
+- [x] **Import now parses tables, nested lists, math, and strips YAML
+  front-matter** (0.7.3). GFM `| a | b |` -> simple_table (nested rows/cells),
+  indented list items -> nested `children`, `$$...$$` -> math_equation, and a
+  leading `---`…`---` front-matter block is dropped. Verified end-to-end
+  (markdown -> AppFlowy page -> export round-trips to a real table/nesting/math).
+  The nested-block create contract was validated live first.
 - [ ] **Inline escaping** of `* _ | [ ] backtick` — deferred: requires a matched
   unescape on import (this parser has no backslash-escape handling), so shipping
-  export-only escaping would break the round-trip.
+  export-only escaping would break the round-trip. (Table cells DO unescape
+  `\|`.)
 - [ ] **Underscore emphasis** (`_x_` / `__x__`) — deliberately NOT done: the
   docs are full of `snake_case` identifiers that naive `_..._` would italicize.
 - [ ] Nested inline (e.g. a bold link `**[t](u)**`) — needs a real tokenizer.

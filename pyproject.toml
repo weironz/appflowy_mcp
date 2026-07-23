@@ -1,6 +1,6 @@
 [project]
 name = "appflowy-mcp"
-version = "0.7.2"
+version = "0.7.3"
 description = "AppFlowy MCP server for workspace, space, page, database, and row operations"
 readme = "README.md"
 requires-python = ">=3.14,<3.15"
