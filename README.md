@@ -260,6 +260,39 @@ AppFlowy-Cloud has no export REST endpoint (the desktop app exports client-side)
 
 `appflowy_create_database_field` field types: 0=RichText, 1=Number, 2=DateTime, 3=SingleSelect, 4=MultiSelect, 5=Checkbox, 6=URL, 7=Checklist.
 
+#### Database row page content
+
+A database row and its page body are different AppFlowy collabs. The page body
+uses a deterministic UUIDv5 derived from the row UUID; passing `row_id` to a
+normal page append tool targets the wrong collab and produces an error such as
+`Record deleted: Document/{row_id} is not active`.
+
+Initialize the row document atomically by supplying Markdown in `document` when
+creating the row:
+
+```json
+{
+  "workspace_id": "workspace-uuid",
+  "database_id": "database-uuid",
+  "request": {
+    "cells": {
+      "Name": "Weekly Project Sync",
+      "Date": "2026-09-01"
+    },
+    "document": "# Meeting Summary\n\n## Decisions\n\n- Decision one\n\n## Action Items\n\n- [ ] Follow up"
+  }
+}
+```
+
+The result includes both `id` (the database row UUID) and `document_id` (the
+separate page-body UUID). For later additions, call
+`appflowy_append_markdown_to_row` with the workspace, database, and row IDs.
+Do not use `appflowy_append_markdown_to_page` with a row ID.
+
+Rows created without `document` do not have an initialized row-document collab.
+For repeatable automation, either include the initial body during creation or
+use `appflowy_upsert_row` with a stable `pre_hash` and Markdown `document`.
+
 ### Search
 
 - `appflowy_search`
@@ -352,6 +385,14 @@ During development, run the CLI from this repository with `uv run python -m appf
 ```bash
 uv run appflowy-mcp
 ```
+
+For a Hermes agent in another machine or LXC on the same trusted LAN:
+
+```bash
+MCP_TRANSPORT=http MCP_HOST=0.0.0.0 MCP_PORT=8000 uv run appflowy-mcp
+```
+
+Connect Hermes using Streamable HTTP at `http://MCP_SERVER_LAN_IP:8000/mcp`.
 
 ## Publish To PyPI
 

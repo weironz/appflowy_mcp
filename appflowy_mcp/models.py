@@ -23,13 +23,32 @@ class RefreshTokenRequest(BaseModel):
 
 class RowCreateRequest(BaseModel):
     cells: dict[str, Any]
-    document: str | None = None
+    document: str | None = Field(
+        None,
+        description=(
+            "Initial database-row page body in Markdown. Supply this in the same "
+            "call that creates the row when the row needs page content; AppFlowy "
+            "then initializes the row's separate document collab atomically."
+        ),
+    )
 
 
 class RowUpdateRequest(BaseModel):
-    pre_hash: str | None = None
+    pre_hash: str | None = Field(
+        None,
+        description=(
+            "Stable key used to derive the row UUID. Reuse exactly the same value "
+            "on later upserts of this row."
+        ),
+    )
     cells: dict[str, Any]
-    document: str | None = None
+    document: str | None = Field(
+        None,
+        description=(
+            "Complete database-row page body in Markdown. On upsert this replaces "
+            "the document body for the row derived from pre_hash."
+        ),
+    )
 
 
 class CreateSpaceRequest(BaseModel):
