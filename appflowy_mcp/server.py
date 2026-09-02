@@ -78,6 +78,21 @@ def response_data(body):
     return body.get("data", body)
 
 
+def database_row_document_id(row_id: str) -> str:
+    """Return AppFlowy's deterministic document UUID for a database row.
+
+    A row is a DatabaseRow collab. Its page body is a separate Document collab
+    whose UUID is UUIDv5(namespace=row UUID, name="document_id"). Passing the
+    row UUID to a normal page-content endpoint therefore targets the wrong
+    collab type and produces "Record deleted: Document/{row_id} is not active".
+    """
+    try:
+        row_uuid = uuid.UUID(row_id)
+    except (ValueError, AttributeError) as exc:
+        raise ValueError(f"row_id must be a valid UUID, got {row_id!r}") from exc
+    return str(uuid.uuid5(row_uuid, "document_id"))
+
+
 def ensure_parent_is_not_workspace(workspace_id: str, parent_view_id: str) -> None:
     """Guard against passing the workspace_id as a page parent.
 
@@ -332,23 +347,45 @@ def appflowy_get_row_details(
         raise Exception(f"Failed to get row details: {str(e)}")
 
 
-@mcp.tool(name="appflowy_create_row", description="Create a new row in a database.")
+@mcp.tool(
+    name="appflowy_create_row",
+    description=(
+        "Create a database row. IMPORTANT: when the row needs a page body, pass "
+        "the Markdown in request.document in this same call. This atomically "
+        "initializes AppFlowy's separate row-document collab. Do not create an "
+        "empty row and then call a normal page append tool with the row ID."
+    ),
+)
 def appflowy_create_row(workspace_id: str, database_id: str, request: RowCreateRequest):
-    """Create a new row in a database."""
+    """Create a row, optionally initializing its Markdown page body atomically."""
     ensure_authenticated()
 
     try:
         row_id = client.create_database_row(
             workspace_id, database_id, cells=request.cells, document=request.document
         )
-        return {"id": row_id}
+        initialized = bool(request.document)
+        return {
+            "id": row_id,
+            "document_id": database_row_document_id(row_id) if initialized else None,
+            "document_initialized": initialized,
+            "note": (
+                "Use appflowy_append_markdown_to_row for later additions."
+                if initialized
+                else "No row document was initialized. Include request.document when creating a row that needs page content."
+            ),
+        }
     except Exception as e:
         raise Exception(f"Failed to create row: {str(e)}")
 
 
 @mcp.tool(
     name="appflowy_upsert_row",
-    description="Update existing row or create if it doesn't exist.",
+    description=(
+        "Create or replace a deterministic row derived from request.pre_hash. "
+        "request.document is Markdown and replaces the row page body. Reuse the "
+        "same non-empty pre_hash on every call for the same logical row."
+    ),
 )
 def appflowy_upsert_row(workspace_id: str, database_id: str, request: RowUpdateRequest):
     """Update existing row or create if it doesn't exist."""
@@ -362,9 +399,66 @@ def appflowy_upsert_row(workspace_id: str, database_id: str, request: RowUpdateR
             cells=request.cells, 
             document=request.document
         )
-        return {"id": row_id}
+        initialized = bool(request.document)
+        return {
+            "id": row_id,
+            "document_id": database_row_document_id(row_id) if initialized else None,
+            "document_initialized": initialized,
+        }
     except Exception as e:
         raise Exception(f"Failed to upsert row: {str(e)}")
+
+
+@mcp.tool(
+    name="appflowy_append_markdown_to_row",
+    description=(
+        "Append Markdown to an existing database row page. This resolves the "
+        "row's separate deterministic Document collab instead of incorrectly "
+        "using row_id as a normal page ID. The row document must have been "
+        "initialized by supplying request.document to appflowy_create_row or "
+        "appflowy_upsert_row."
+    ),
+)
+def appflowy_append_markdown_to_row(
+    workspace_id: str,
+    database_id: str,
+    row_id: str,
+    request: AppendMarkdownRequest,
+):
+    """Append Markdown blocks to an initialized database-row document."""
+    ensure_authenticated()
+
+    try:
+        details = client.get_database_row_details(
+            workspace_id, database_id, [row_id], with_doc=False
+        )
+        if not details:
+            raise Exception(
+                f"Database row {row_id} was not found in database {database_id}."
+            )
+        if not details[0].get("has_doc", False):
+            raise Exception(
+                "This row was created without a document, so AppFlowy has not "
+                "initialized its row-document collab. Create the row with the "
+                "initial Markdown in appflowy_create_row request.document, or use "
+                "appflowy_upsert_row with a stable pre_hash and document."
+            )
+
+        document_id = database_row_document_id(row_id)
+        blocks = parse_markdown_to_blocks(request.content)
+        body = client._request(
+            "POST",
+            f"/api/workspace/{workspace_id}/page-view/{document_id}/append-block",
+            json_body={"blocks": blocks},
+        )
+        return {
+            "result": response_data(body),
+            "row_id": row_id,
+            "document_id": document_id,
+            "block_count": len(blocks),
+        }
+    except Exception as e:
+        raise Exception(f"Failed to append markdown to database row: {str(e)}")
 
 @mcp.tool(
     name="appflowy_get_updated_rows", 
@@ -2167,7 +2261,15 @@ def appflowy_chat_ask(workspace_id: str, chat_id: str, question: str):
 
 
 def main():
-    mcp.run()
+    transport = os.getenv("MCP_TRANSPORT", "stdio").strip().lower()
+    if transport == "streamable-http":
+        transport = "http"
+    mcp.run(
+        transport=transport,
+        host=os.getenv("MCP_HOST", "127.0.0.1"),
+        port=int(os.getenv("MCP_PORT", "8000")),
+        show_banner=False,
+    )
 
 
 if __name__ == "__main__":
