@@ -26,6 +26,7 @@ from .models import (
     FavoritePageRequest,
     MovePageRequest,
     ReorderPagesRequest,
+    AppendPageLinkRequest,
     AppendBlocksRequest,
     AppendTextRequest,
     CreateMarkdownPageRequest,
@@ -687,6 +688,48 @@ def appflowy_append_blocks_to_page(
         return response_data(body)
     except Exception as e:
         raise Exception(f"Failed to append blocks to page: {str(e)}")
+
+
+@mcp.tool(
+    name="appflowy_append_page_link",
+    description=(
+        "Append a native AppFlowy Link-to-page block to an existing page. "
+        "target_page_id must be the view_id of the page to link to."
+    ),
+)
+def appflowy_append_page_link(
+    workspace_id: str,
+    page_id: str,
+    request: AppendPageLinkRequest,
+):
+    """Append a native linked_page block to an AppFlowy document page."""
+    ensure_authenticated()
+
+    try:
+        blocks = [
+            {
+                "type": "linked_page",
+                "data": {
+                    "view_id": request.target_page_id,
+                },
+            }
+        ]
+
+        body = client._request(
+            "POST",
+            f"/api/workspace/{workspace_id}/page-view/{page_id}/append-block",
+            json_body={"blocks": blocks},
+        )
+
+        return {
+            "result": response_data(body),
+            "page_id": page_id,
+            "target_page_id": request.target_page_id,
+            "block_type": "linked_page",
+        }
+
+    except Exception as e:
+        raise Exception(f"Failed to append page link: {str(e)}")
 
 
 @mcp.tool(

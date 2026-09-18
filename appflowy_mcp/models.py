@@ -119,6 +119,14 @@ class SavePageRequest(BaseModel):
     collab_id: str | None = None
 
 
+class AppendPageLinkRequest(BaseModel):
+    target_page_id: str = Field(
+        ...,
+        min_length=1,
+        description="view_id of the AppFlowy page to link to.",
+    )
+
+
 class AppendPageContentRequest(BaseModel):
     content: str = Field(..., min_length=1)
     content_format: str = "markdown"
