@@ -45,6 +45,8 @@ Large workspaces go from minutes to seconds.
   leading `---`…`---` front-matter block is dropped. Verified end-to-end
   (markdown -> AppFlowy page -> export round-trips to a real table/nesting/math).
   The nested-block create contract was validated live first.
+- [x] **Edit and delete database rows** (0.8.0). `appflowy_update_row`, `appflowy_delete_row` and `appflowy_restore_row` write through the collab layer (`web-update`), mirroring the web client: row cells are set on the row collab, and a deleted row is flagged `is_deleted` in every view's `row_orders`. Verified live on a board: a checklist toggle and a status change showed in REST, and a deleted row disappeared from REST and every view.
+- [x] **Appended blocks keep their order** (0.8.0). `append-block` put children at the front, which reversed table rows and cells, and a batch of top-level blocks landed out of order. Blocks are now sent one top-level block per call, with their children pre-reversed. Verified live with headings, tables, nested lists and ordered lists.
 - [ ] **Inline escaping** of `* _ | [ ] backtick` — deferred: requires a matched
   unescape on import (this parser has no backslash-escape handling), so shipping
   export-only escaping would break the round-trip. (Table cells DO unescape

@@ -5,9 +5,11 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import Any
 
 from fastmcp import FastMCP
 
+from . import collab as collab_rows
 from .client import DEFAULT_BASE_URL, AppFlowyClient
 from .export import decode_document, document_to_markdown, sanitize_filename
 from .importer import MarkdownImporter
@@ -135,6 +137,34 @@ def create_page_with_blocks(
         json_body=payload,
     )
     return response_data(body)
+
+
+def _server_order(block: dict) -> dict:
+    """Pre-reverse children for the append-block endpoint.
+
+    append-block inserts each block's children at the front, so a table's rows
+    and cells (and nested list items) came out reversed; and several top-level
+    blocks in one call land out of order. Sending one top-level block per call
+    with its children pre-reversed yields the Markdown order exactly.
+    """
+    block = dict(block)
+    children = block.get("children")
+    if children:
+        block["children"] = [_server_order(c) for c in reversed(children)]
+    return block
+
+
+def append_blocks(workspace_id: str, page_id: str, blocks: list[dict]):
+    """Append blocks to the end of a page, in order. Returns the last response."""
+    body: dict = {}
+    for block in blocks:
+        body = client._request(
+            "POST",
+            f"/api/workspace/{workspace_id}/page-view/{page_id}/append-block",
+            json_body={"blocks": [_server_order(block)]},
+        )
+    return body
+
 
 # ==================== AUTHENTICATION TOOLS ====================
 
@@ -332,7 +362,14 @@ def appflowy_get_row_details(
         raise Exception(f"Failed to get row details: {str(e)}")
 
 
-@mcp.tool(name="appflowy_create_row", description="Create a new row in a database.")
+@mcp.tool(
+    name="appflowy_create_row",
+    description=(
+        "Create a new row in a database. Checklist cells need an `id` on every "
+        "option ({options: [{id, name, color}], selected_option_ids}) or the "
+        "server silently empties them; appflowy_update_row accepts plain task names."
+    ),
+)
 def appflowy_create_row(workspace_id: str, database_id: str, request: RowCreateRequest):
     """Create a new row in a database."""
     ensure_authenticated()
@@ -347,8 +384,68 @@ def appflowy_create_row(workspace_id: str, database_id: str, request: RowCreateR
 
 
 @mcp.tool(
+    name="appflowy_update_row",
+    description=(
+        "Edit cells of an EXISTING row (the REST API cannot). `cells` maps field "
+        "name (or id) to a value: text/number/url -> string; single select -> "
+        "option name; multi select -> list of option names; checkbox -> bool; "
+        "date -> ISO date/datetime or {start, end?, include_time?}; checklist -> "
+        "list of task names / {name, done} (replaces), or {check, uncheck, add, "
+        "remove: [task names]} (edits). Nothing is written if any value is invalid."
+    ),
+)
+def appflowy_update_row(
+    workspace_id: str, database_id: str, row_id: str, cells: dict[str, Any]
+):
+    """Edit row cells through the collab layer."""
+    ensure_authenticated()
+
+    try:
+        return collab_rows.update_row(client, workspace_id, database_id, row_id, cells)
+    except Exception as e:
+        raise Exception(f"Failed to update row: {str(e)}")
+
+
+@mcp.tool(
+    name="appflowy_delete_row",
+    description=(
+        "Delete a row from a database, as the web UI does: the row is flagged "
+        "deleted in every view (hidden everywhere) and can be brought back with "
+        "appflowy_restore_row."
+    ),
+)
+def appflowy_delete_row(workspace_id: str, database_id: str, row_id: str):
+    """Soft-delete a row in every view."""
+    ensure_authenticated()
+
+    try:
+        return collab_rows.delete_row(client, workspace_id, database_id, row_id)
+    except Exception as e:
+        raise Exception(f"Failed to delete row: {str(e)}")
+
+
+@mcp.tool(
+    name="appflowy_restore_row",
+    description="Undo appflowy_delete_row: make a deleted row visible again in every view.",
+)
+def appflowy_restore_row(workspace_id: str, database_id: str, row_id: str):
+    """Clear the deleted flag of a row in every view."""
+    ensure_authenticated()
+
+    try:
+        return collab_rows.restore_row(client, workspace_id, database_id, row_id)
+    except Exception as e:
+        raise Exception(f"Failed to restore row: {str(e)}")
+
+
+@mcp.tool(
     name="appflowy_upsert_row",
-    description="Update existing row or create if it doesn't exist.",
+    description=(
+        "Create-or-update a row keyed by pre_hash. WARNING: the server derives the "
+        "row id from pre_hash (not a valid v4 UUID) and does not add the row to any "
+        "view, so it does not show up in boards/grids. To create use "
+        "appflowy_create_row; to edit use appflowy_update_row."
+    ),
 )
 def appflowy_upsert_row(workspace_id: str, database_id: str, request: RowUpdateRequest):
     """Update existing row or create if it doesn't exist."""
@@ -679,11 +776,7 @@ def appflowy_append_blocks_to_page(
     ensure_authenticated()
 
     try:
-        body = client._request(
-            "POST",
-            f"/api/workspace/{workspace_id}/page-view/{page_id}/append-block",
-            json_body=request.model_dump(exclude_none=True),
-        )
+        body = append_blocks(workspace_id, page_id, request.blocks)
         return response_data(body)
     except Exception as e:
         raise Exception(f"Failed to append blocks to page: {str(e)}")
@@ -707,11 +800,7 @@ def appflowy_append_text_to_page(
             }
             for text in request.texts
         ]
-        body = client._request(
-            "POST",
-            f"/api/workspace/{workspace_id}/page-view/{page_id}/append-block",
-            json_body={"blocks": blocks},
-        )
+        body = append_blocks(workspace_id, page_id, blocks)
         return response_data(body)
     except Exception as e:
         raise Exception(f"Failed to append text to page: {str(e)}")
@@ -755,11 +844,7 @@ def appflowy_append_markdown_to_page(
 
     try:
         blocks = parse_markdown_to_blocks(request.content)
-        body = client._request(
-            "POST",
-            f"/api/workspace/{workspace_id}/page-view/{page_id}/append-block",
-            json_body={"blocks": blocks},
-        )
+        body = append_blocks(workspace_id, page_id, blocks)
         return {"result": response_data(body), "block_count": len(blocks)}
     except Exception as e:
         raise Exception(f"Failed to append markdown to page: {str(e)}")
@@ -813,11 +898,7 @@ def appflowy_append_page_content(
 
     try:
         blocks = parse_content_to_blocks(request.content, request.content_format)
-        body = client._request(
-            "POST",
-            f"/api/workspace/{workspace_id}/page-view/{page_id}/append-block",
-            json_body={"blocks": blocks},
-        )
+        body = append_blocks(workspace_id, page_id, blocks)
         return {
             "result": response_data(body),
             "block_count": len(blocks),

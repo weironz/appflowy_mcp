@@ -255,8 +255,17 @@ AppFlowy-Cloud has no export REST endpoint (the desktop app exports client-side)
 - `appflowy_list_rows`
 - `appflowy_get_row_details`
 - `appflowy_create_row`
+- `appflowy_update_row`
+- `appflowy_delete_row`
+- `appflowy_restore_row`
 - `appflowy_upsert_row`
 - `appflowy_get_updated_rows`
+
+The REST API can create rows but not edit or delete them. `appflowy_update_row`, `appflowy_delete_row` and `appflowy_restore_row` do it the way the web client does: they fetch the row (or database) collab, change it with pycrdt, and send only the diff to `POST /api/workspace/v1/{ws}/collab/{id}/web-update`.
+
+- `appflowy_update_row` takes cells by field **name**. Select values are option names, and checklists can be toggled with `{"check": ["task"], "uncheck": [...], "add": [...], "remove": [...]}`. If any value is invalid, nothing is written.
+- `appflowy_delete_row` marks the row `is_deleted` in every view, the same as deleting it in the UI. `appflowy_restore_row` brings it back.
+- Avoid `appflowy_upsert_row` for new rows. The row id is derived from `pre_hash` (not a valid v4 UUID), and the row is never added to any view, so boards and grids don't show it.
 
 `appflowy_create_database_field` field types: 0=RichText, 1=Number, 2=DateTime, 3=SingleSelect, 4=MultiSelect, 5=Checkbox, 6=URL, 7=Checklist.
 
