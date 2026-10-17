@@ -21,13 +21,13 @@ pub fn base64_decode(input: &str) -> Option<Vec<u8>> {
         return None;
     }
     let mut out = Vec::with_capacity(sextets.len() * 3 / 4 + 3);
-    let mut chunks = sextets.chunks_exact(4);
-    for chunk in &mut chunks {
+    let (chunks, remainder) = sextets.as_chunks::<4>();
+    for chunk in chunks {
         out.push((chunk[0] << 2) | (chunk[1] >> 4));
         out.push((chunk[1] << 4) | (chunk[2] >> 2));
         out.push((chunk[2] << 6) | chunk[3]);
     }
-    match chunks.remainder() {
+    match remainder {
         [a, b] => out.push((a << 2) | (b >> 4)),
         [a, b, c] => {
             out.push((a << 2) | (b >> 4));
