@@ -524,3 +524,138 @@ fn test_roundtrip_nested_attributes() {
     )];
     assert_eq!(parse_rich_text(&delta_to_markdown(&delta)), delta);
 }
+
+// ---------------------------------------------------------------------------
+// Round-trip fidelity: block-marker escaping, link labels with ], dividers
+// vs front matter, inline images in containers.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_roundtrip_leading_block_markers_stay_paragraph_text() {
+    use appflowy_mcp::delta::DeltaOp;
+    use appflowy_mcp::render::delta_to_markdown;
+    // A paragraph whose text starts with a block marker must not re-import as
+    // that block type; a bare ``` must not open a code fence.
+    for text in [
+        "# not a heading",
+        "- not a list",
+        "> not a quote",
+        "1. not numbered",
+        "---",
+        "```",
+        "```rust",
+        "$$x$$",
+    ] {
+        let delta = vec![DeltaOp::plain(text)];
+        let md = delta_to_markdown(&delta);
+        let blocks = parse_markdown_to_blocks(&(md.clone() + "\n"), None);
+        assert_eq!(
+            blocks[0].ty, "paragraph",
+            "{text:?} re-imported as {} (markdown: {md:?})",
+            blocks[0].ty
+        );
+        assert_eq!(parse_rich_text(&md), delta, "{text:?} text changed");
+    }
+}
+
+#[test]
+fn test_roundtrip_link_label_ending_in_bracket() {
+    use appflowy_mcp::delta::DeltaOp;
+    use appflowy_mcp::render::delta_to_markdown;
+    let attrs = serde_json::Map::from_iter(
+        [("href", json!("https://u.example"))]
+            .iter()
+            .cloned()
+            .map(|(k, v)| (k.to_string(), v)),
+    );
+    let delta = vec![DeltaOp::with_attributes("a]", attrs)];
+    let md = delta_to_markdown(&delta);
+    // The exported `[a\](url)` must re-import as the same link, and Pandoc's
+    // identical escaping must work too.
+    assert_eq!(md, "[a\\]](https://u.example)");
+    assert_eq!(parse_rich_text(&md), delta);
+    assert_eq!(parse_rich_text("[a\\]](https://u.example)"), delta);
+}
+
+#[test]
+fn test_leading_divider_not_confused_with_front_matter() {
+    // [divider, paragraph, divider, paragraph] — the exporter emits bare
+    // `---` for dividers; only YAML-shaped bodies may be treated as front
+    // matter, so "a" must survive.
+    let md = "---\n\na\n\n---\n\nb\n";
+    let blocks = parse_markdown_to_blocks(md, None);
+    let types: Vec<&str> = blocks.iter().map(|b| b.ty.as_str()).collect();
+    assert_eq!(types, ["divider", "paragraph", "divider", "paragraph"]);
+    assert_eq!(blocks[1].data["delta"], json!([{"insert": "a"}]));
+}
+
+#[test]
+fn test_inline_images_inside_list_and_heading() {
+    // Images inside list items / headings break out as real image blocks
+    // (previously flattened into `!` + link text).
+    let blocks = parse_markdown_to_blocks("- ![logo](https://img.example/a.png)\n", None);
+    assert_eq!(
+        to_json(blocks),
+        json!([{
+            "type": "bulleted_list",
+            "data": {"delta": [{"insert": ""}]},
+            "children": [{
+                "type": "image",
+                "data": {"url": "https://img.example/a.png", "caption": "logo"},
+            }],
+        }])
+    );
+
+    let blocks = parse_markdown_to_blocks("# title ![a](https://img.example/b.png)\n", None);
+    assert_eq!(
+        to_json(blocks),
+        json!([{
+            "type": "heading",
+            "data": {"level": 1, "delta": [{"insert": "title "}]},
+            "children": [{
+                "type": "image",
+                "data": {"url": "https://img.example/b.png", "caption": "a"},
+            }],
+        }])
+    );
+
+    // Image inside a quote, with resolver applied. Text after the image
+    // becomes a child paragraph of the quote (the delta can't span images).
+    let mut resolve = |url: &str, _caption: &str| format!("cdn:{url}");
+    let blocks = parse_markdown_to_blocks(
+        "> see ![shot](https://img.example/c.png) here\n",
+        Some(&mut resolve),
+    );
+    assert_eq!(
+        to_json(blocks),
+        json!([{
+            "type": "quote",
+            "data": {"delta": [{"insert": "see "}]},
+            "children": [
+                {
+                    "type": "image",
+                    "data": {"url": "cdn:https://img.example/c.png", "caption": "shot"},
+                },
+                {
+                    "type": "paragraph",
+                    "data": {"delta": [{"insert": " here"}]},
+                },
+            ],
+        }])
+    );
+}
+
+#[test]
+fn test_inline_image_syntax_in_code_span_is_verbatim() {
+    // `` `![a](b)` `` inside a paragraph is code, not an image: the inline
+    // tokenizer sees the code span first, so the image syntax stays text.
+    let deltas = parse_rich_text("use `![a](b)` syntax");
+    assert_eq!(
+        serde_json::to_value(&deltas).unwrap(),
+        json!([
+            {"insert": "use "},
+            {"insert": "![a](b)", "attributes": {"code": true}},
+            {"insert": " syntax"},
+        ])
+    );
+}

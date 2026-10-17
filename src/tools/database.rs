@@ -764,14 +764,24 @@ impl AppServer {
                 break;
             }
             let mut page_query = query.clone();
-            page_query.push(("cursor", cursor));
+            page_query.push(("cursor", cursor.clone()));
             let next_page = self
                 .client
                 .request(Method::GET, &base_path, Some(&page_query), None)
                 .await
                 .map_err(map_tool_error)?;
+            // The fetch succeeded, so an unrecognized shape is a real
+            // contract change — silently dropping the page (or stopping with
+            // a stale cursor that looks like "done") would report a partial
+            // merge as success. Fail loudly, naming the offending page.
             let Some(items) = history_page_items(&next_page) else {
-                break;
+                return Err(map_tool_error(Error::Other(format!(
+                    "History page {} (cursor {:?}) had no recognizable items \
+                     array (looked for a top-level array, or data/items/history); \
+                     returning unmerged results would silently lose this page.",
+                    pages_fetched + 1,
+                    cursor
+                ))));
             };
             merged.extend(items);
             last_page = next_page;
@@ -868,5 +878,37 @@ mod tests {
                 ],
             })
         );
+    }
+
+    #[test]
+    fn history_page_items_recognizes_known_shapes() {
+        // A follow-up page the fetch_all loop cannot parse is a hard error
+        // (silent drop would lose data), so the recognized shapes matter.
+        assert_eq!(
+            history_page_items(&json!({"data": [{"v": 1}]})),
+            Some(vec![json!({"v": 1})])
+        );
+        assert_eq!(
+            history_page_items(&json!([{"v": 1}, {"v": 2}])),
+            Some(vec![json!({"v": 1}), json!({"v": 2})])
+        );
+        // Unrecognized: a bare object with no known array key.
+        assert_eq!(history_page_items(&json!({"items": "not-an-array"})), None);
+        assert_eq!(history_page_items(&json!({"foo": 1})), None);
+    }
+
+    #[test]
+    fn history_next_cursor_finds_nested_cursors() {
+        assert_eq!(
+            history_next_cursor(&json!({"next_cursor": "abc"})),
+            Some("abc".to_string())
+        );
+        assert_eq!(
+            history_next_cursor(&json!({"pagination": {"next": "abc"}})),
+            Some("abc".to_string())
+        );
+        // Empty string or null means "no next page".
+        assert_eq!(history_next_cursor(&json!({"next_cursor": ""})), None);
+        assert_eq!(history_next_cursor(&json!({})), None);
     }
 }

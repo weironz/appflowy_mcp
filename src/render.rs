@@ -9,8 +9,8 @@ use crate::delta::DeltaOp;
 /// so that re-importing yields the same characters. Applied to the raw insert
 /// *before* the bold/italic/strikethrough wrappers are added (the wrappers
 /// themselves must stay markers), which is the "only when unavoidable"
-/// boundary: everything a plain run contains of `\`, `` ` ``, `*`, `[`, `]`
-/// IS escaped — anything less re-imports as formatting. Exemptions:
+/// boundary: everything a plain run contains of `\`, `` ` ``, `*`, `[`, `]`,
+/// `~` IS escaped — anything less re-imports as formatting. Exemptions:
 /// - code spans: content is verbatim (import parses nothing inside);
 /// - href URLs: copied raw (import reads them raw up to the first `)`);
 /// - image alt/caption text: written verbatim (import extracts it by regex
@@ -24,11 +24,55 @@ use crate::delta::DeltaOp;
 fn escape_inline(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for ch in text.chars() {
-        if matches!(ch, '\\' | '`' | '*' | '[' | ']') {
+        if matches!(ch, '\\' | '`' | '*' | '[' | ']' | '~') {
             out.push('\\');
         }
         out.push(ch);
     }
+    out
+}
+
+/// Escape block-level markers at the start of an exported paragraph line, so
+/// a paragraph whose text begins like block syntax (`# x`, `- x`, `> x`,
+/// `1. x`, `---`, ```` ``` ````, `$$x$$`) does not re-import as that block
+/// type. Only the line-initial position matters: once any non-marker text
+/// has been emitted the rest of the line is inside a paragraph. Un-escaped on
+/// import by the same `is_escapable` set as [`escape_inline`].
+///
+/// Callers pass the inline-escaped text of the FIRST op of the line when the
+/// line starts at offset 0 of that op; markers past the first character of
+/// the op cannot start a block, so nothing else needs treatment.
+fn escape_leading_block_markers(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let Some(&first) = bytes.first() else {
+        return String::new();
+    };
+    // A numbered-list opener is `\d+\.`: escape the dot right after a run of
+    // leading digits, keeping the digits readable (`1\.` stays text).
+    if first.is_ascii_digit() {
+        if let Some(dot) = bytes.iter().position(|&b| !b.is_ascii_digit()) {
+            if bytes.get(dot) == Some(&b'.') {
+                let mut out = String::with_capacity(text.len() + 1);
+                out.push_str(&text[..dot]);
+                out.push('\\');
+                out.push_str(&text[dot..]);
+                return out;
+            }
+        }
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len() + 2);
+    let escapes = |first: u8| match first {
+        // `#`, `>` and `$` open headings / quotes / math; escaping them at
+        // the line start makes the line plain text.
+        b'#' | b'>' | b'$' => true,
+        b'-' => matches!(bytes.get(1), None | Some(b' ') | Some(b'-')),
+        _ => false,
+    };
+    if escapes(first) {
+        out.push('\\');
+    }
+    out.push_str(text);
     out
 }
 
@@ -48,6 +92,11 @@ pub fn delta_to_markdown(delta: &[DeltaOp]) -> String {
         } else {
             escape_inline(&op.insert)
         };
+        if out.is_empty() && !text.is_empty() {
+            // The first run of an exported line: escape block markers at its
+            // start so the line can't re-import as a different block type.
+            text = escape_leading_block_markers(&text);
+        }
         if attrs.get("bold").is_some_and(py_truthy) {
             text = format!("**{text}**");
         }
@@ -192,7 +241,12 @@ impl<'a> Renderer<'a> {
                     self.lines.push(String::new());
                 }
                 "divider" => {
-                    self.lines.push("---".to_string());
+                    // `***` instead of `---`: a document whose FIRST block is a
+                    // divider exports with a leading `---`, which the importer
+                    // can mistake for YAML front matter and swallow up to the
+                    // next `---`. `***` is an equally valid divider that never
+                    // opens front matter.
+                    self.lines.push("***".to_string());
                     self.lines.push(String::new());
                 }
                 "image" => {

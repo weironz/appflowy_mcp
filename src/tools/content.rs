@@ -18,6 +18,9 @@ use crate::tools::util::{
 };
 
 /// Python `Field(..., min_length=1)` on strings, checked after trimming.
+/// pages.rs carries an identical helper (util.rs is shared, but adding a
+/// cross-module dependency for two lines was not worth it) — keep the
+/// trim semantics in sync so id validation behaves the same everywhere.
 fn require_non_empty(value: &str, field: &str) -> Result<(), ToolError> {
     if value.trim().is_empty() {
         return Err(ToolError::validation(format!("{field} must not be empty")));
@@ -240,6 +243,8 @@ impl AppServer {
         &self,
         Parameters(request): Parameters<AppendBlocksRequest>,
     ) -> Result<Json<Value>, ToolError> {
+        require_non_empty(&request.workspace_id, "workspace_id")?;
+        require_non_empty(&request.page_id, "page_id")?;
         if request.blocks.is_empty() {
             return Err(ToolError::validation("blocks must not be empty"));
         }
@@ -257,6 +262,8 @@ impl AppServer {
         &self,
         Parameters(request): Parameters<AppendTextRequest>,
     ) -> Result<Json<Value>, ToolError> {
+        require_non_empty(&request.workspace_id, "workspace_id")?;
+        require_non_empty(&request.page_id, "page_id")?;
         if request.texts.is_empty() {
             return Err(ToolError::validation("texts must not be empty"));
         }
@@ -285,6 +292,8 @@ impl AppServer {
         &self,
         Parameters(request): Parameters<CreateMarkdownPageRequest>,
     ) -> Result<Json<Value>, ToolError> {
+        require_non_empty(&request.workspace_id, "workspace_id")?;
+        require_non_empty(&request.parent_view_id, "parent_view_id")?;
         require_non_empty(&request.title, "title")?;
         require_non_empty(&request.content, "content")?;
         validate_layout(request.layout)?;
@@ -313,6 +322,8 @@ impl AppServer {
         &self,
         Parameters(request): Parameters<AppendMarkdownRequest>,
     ) -> Result<Json<Value>, ToolError> {
+        require_non_empty(&request.workspace_id, "workspace_id")?;
+        require_non_empty(&request.page_id, "page_id")?;
         require_non_empty(&request.content, "content")?;
         let blocks = parse_markdown_to_blocks(&request.content, None);
         let block_count = blocks.len();
@@ -337,6 +348,8 @@ impl AppServer {
         &self,
         Parameters(request): Parameters<SavePageRequest>,
     ) -> Result<Json<Value>, ToolError> {
+        require_non_empty(&request.workspace_id, "workspace_id")?;
+        require_non_empty(&request.parent_view_id, "parent_view_id")?;
         require_non_empty(&request.title, "title")?;
         require_non_empty(&request.content, "content")?;
         validate_layout(request.layout)?;
@@ -370,6 +383,8 @@ impl AppServer {
         &self,
         Parameters(request): Parameters<AppendPageContentRequest>,
     ) -> Result<Json<Value>, ToolError> {
+        require_non_empty(&request.workspace_id, "workspace_id")?;
+        require_non_empty(&request.page_id, "page_id")?;
         require_non_empty(&request.content, "content")?;
         let blocks = parse_content_to_blocks(&request.content, &request.content_format)
             .map_err(ToolError::validation)?;
@@ -398,6 +413,8 @@ impl AppServer {
         &self,
         Parameters(request): Parameters<AppendPageLinkRequest>,
     ) -> Result<Json<Value>, ToolError> {
+        require_non_empty(&request.workspace_id, "workspace_id")?;
+        require_non_empty(&request.page_id, "page_id")?;
         require_non_empty(&request.target_page_id, "target_page_id")?;
         let data = self
             .client
@@ -433,6 +450,8 @@ impl AppServer {
         &self,
         Parameters(request): Parameters<ImportMarkdownFileRequest>,
     ) -> Result<Json<Value>, ToolError> {
+        require_non_empty(&request.workspace_id, "workspace_id")?;
+        require_non_empty(&request.parent_view_id, "parent_view_id")?;
         require_non_empty(&request.path, "path")?;
         ensure_parent_is_not_workspace(&request.workspace_id, &request.parent_view_id)
             .map_err(map_tool_error)?;
@@ -458,6 +477,8 @@ impl AppServer {
         &self,
         Parameters(request): Parameters<ImportMarkdownDirectoryRequest>,
     ) -> Result<Json<Value>, ToolError> {
+        require_non_empty(&request.workspace_id, "workspace_id")?;
+        require_non_empty(&request.parent_view_id, "parent_view_id")?;
         require_non_empty(&request.path, "path")?;
         ensure_parent_is_not_workspace(&request.workspace_id, &request.parent_view_id)
             .map_err(map_tool_error)?;

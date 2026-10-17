@@ -1,8 +1,9 @@
 //! `appflowy update`: self-update the binary from GitHub Releases.
 //!
 //! Mirrors install.sh / install.ps1: resolve a release tag (latest, or
-//! pinned via --version / APPFLOWY_VERSION), download the platform asset,
-//! run `--version` on the download as a smoke test, then swap it in at the
+//! pinned via --version / APPFLOWY_VERSION), download the platform asset
+//! (verifying its sha256 digest when the release records one), run
+//! `--version` on the download as a smoke test, then swap it in at the
 //! running executable's path. The installers drop two names of the same
 //! bytes (`appflowy` + the `appflowy-mcp` MCP alter ego), so the sibling is
 //! re-synced afterwards — both entry points land on the new version.
@@ -14,6 +15,7 @@
 //! it stays locked until this process exits and is swept by `cleanup_stale`
 //! on the next update run.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -149,12 +151,69 @@ fn http_client() -> Result<reqwest::Client> {
         .build()?)
 }
 
-/// Latest release tag from the GitHub API (`{api_base}` is a parameter for
-/// tests; production passes `API_BASE`).
+/// One release as the GitHub API describes it, reduced to what the updater
+/// needs: the tag plus each asset's `digest` field (`sha256:<hex>`). GitHub
+/// only began populating digests in 2025, so older releases carry none —
+/// downloads from them skip checksum verification.
 #[doc(hidden)]
-pub async fn resolve_latest_tag(client: &reqwest::Client, api_base: &str) -> Result<String> {
-    let url = format!("{api_base}/repos/{REPO}/releases/latest");
-    let resp = client.get(&url).send().await?;
+#[derive(Debug)]
+pub struct ReleaseInfo {
+    pub tag: String,
+    /// asset file name -> raw digest; assets without one are omitted.
+    digests: HashMap<String, String>,
+}
+
+impl ReleaseInfo {
+    /// The hex sha256 the release recorded for `asset`, or None when it has
+    /// no digest or uses an algorithm this updater can't check (only
+    /// sha256 — the only one GitHub publishes today — is verified).
+    pub fn sha256_digest(&self, asset: &str) -> Option<&str> {
+        self.digests
+            .get(asset)
+            .and_then(|digest| digest.strip_prefix("sha256:"))
+    }
+}
+
+/// Reduce a release JSON payload to its tag and asset digests; None means
+/// no usable tag_name (callers phrase their own error).
+fn parse_release(body: &Value) -> Option<ReleaseInfo> {
+    let tag = body.get("tag_name")?.as_str()?.to_string();
+    let digests = body
+        .get("assets")
+        .and_then(Value::as_array)
+        .map(|assets| {
+            assets
+                .iter()
+                .filter_map(|asset| {
+                    let name = asset.get("name")?.as_str()?;
+                    let digest = asset.get("digest")?.as_str()?;
+                    Some((name.to_string(), digest.to_string()))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(ReleaseInfo { tag, digests })
+}
+
+/// GET one GitHub API URL and parse the JSON. The optional bearer token is
+/// attached here and only here: GitHub's anonymous API budget is 60
+/// requests/hour per IP (a token raises it to 5000), while the download
+/// host neither needs nor should see credentials. The token is a parameter,
+/// not read from the env, so tests stay hermetic. `what`/`hint` shape the
+/// error; the body is truncated to its leading text because GitHub error
+/// bodies are JSON whose message is the useful part.
+async fn get_release_json(
+    client: &reqwest::Client,
+    url: &str,
+    github_token: Option<&str>,
+    what: &str,
+    hint: &str,
+) -> Result<Value> {
+    let mut request = client.get(url);
+    if let Some(token) = github_token {
+        request = request.bearer_auth(token);
+    }
+    let resp = request.send().await?;
     let status = resp.status();
     if !status.is_success() {
         let body: String = resp
@@ -165,28 +224,87 @@ pub async fn resolve_latest_tag(client: &reqwest::Client, api_base: &str) -> Res
             .take(160)
             .collect();
         return Err(Error::Other(format!(
-            "could not resolve the latest release ({status} from {url}): {body} \
-             — pass --version X.Y.Z to pin a release"
+            "could not {what} ({status} from {url}): {body} — {hint}"
         )));
     }
-    let body: Value = resp.json().await?;
-    let tag = body.get("tag_name").and_then(Value::as_str).unwrap_or("");
-    if tag.is_empty() {
-        return Err(Error::Other(format!(
-            "the latest-release response from {url} has no tag_name"
-        )));
-    }
-    Ok(tag.to_string())
+    Ok(resp.json().await?)
 }
 
-/// Download one release asset (`{download_base}` is a parameter for tests;
-/// production passes `DOWNLOAD_BASE`).
+/// The latest release — its tag plus the assets' digests, which ride along
+/// so the later download needs no second API call (`{api_base}` is a
+/// parameter for tests; production passes `API_BASE`).
+#[doc(hidden)]
+pub async fn resolve_latest_tag(
+    client: &reqwest::Client,
+    api_base: &str,
+    github_token: Option<&str>,
+) -> Result<ReleaseInfo> {
+    let url = format!("{api_base}/repos/{REPO}/releases/latest");
+    let body = get_release_json(
+        client,
+        &url,
+        github_token,
+        "resolve the latest release",
+        "pass --version X.Y.Z to pin a release",
+    )
+    .await?;
+    parse_release(&body).ok_or_else(|| {
+        Error::Other(format!(
+            "the latest-release response from {url} has no tag_name"
+        ))
+    })
+}
+
+/// A pinned release from the GitHub API — the counterpart of
+/// [`resolve_latest_tag`] for `--version` / APPFLOWY_VERSION runs, which
+/// resolve their tag locally and only fetch the metadata (for the asset
+/// digests) once a download is actually happening.
+#[doc(hidden)]
+pub async fn fetch_release_by_tag(
+    client: &reqwest::Client,
+    api_base: &str,
+    github_token: Option<&str>,
+    tag: &str,
+) -> Result<ReleaseInfo> {
+    let url = format!("{api_base}/repos/{REPO}/releases/tags/{tag}");
+    let body = get_release_json(
+        client,
+        &url,
+        github_token,
+        &format!("fetch release {tag}"),
+        &format!("check that {tag} is a published release"),
+    )
+    .await?;
+    parse_release(&body)
+        .ok_or_else(|| Error::Other(format!("the release response from {url} has no tag_name")))
+}
+
+/// Lowercase hex sha256 of `bytes`.
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    use std::fmt::Write as _;
+    let digest = Sha256::digest(bytes);
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in &digest {
+        let _ = write!(hex, "{byte:02x}");
+    }
+    hex
+}
+
+/// Download one release asset, verifying it against the sha256 the release
+/// recorded when it has one (`{download_base}` is a parameter for tests;
+/// production passes `DOWNLOAD_BASE`). Verification happens before the
+/// `--version` smoke test executes the bytes — a substituted binary could
+/// simply print the expected version, but not fake the digest. `expected`
+/// is None for releases that predate digests, leaving the smoke test as
+/// the guard.
 #[doc(hidden)]
 pub async fn download_asset(
     client: &reqwest::Client,
     download_base: &str,
     tag: &str,
     asset: &str,
+    expected_sha256: Option<&str>,
 ) -> Result<Vec<u8>> {
     let url = format!("{download_base}/{REPO}/releases/download/{tag}/{asset}");
     let resp = client.get(&url).send().await?;
@@ -198,7 +316,19 @@ pub async fn download_asset(
              source (docs/installation.md)"
         )));
     }
-    Ok(resp.bytes().await?.to_vec())
+    let bytes = resp.bytes().await?.to_vec();
+    if let Some(expected) = expected_sha256 {
+        let actual = sha256_hex(&bytes);
+        if !actual.eq_ignore_ascii_case(expected) {
+            return Err(Error::Other(format!(
+                "checksum mismatch for {asset} from {tag}: release says \
+                 sha256 {expected}, download hashes to {actual} — the bytes \
+                 were corrupted or tampered with; retry, and report it if it \
+                 persists"
+            )));
+        }
+    }
+    Ok(bytes)
 }
 
 #[cfg(unix)]
@@ -330,21 +460,35 @@ pub async fn cmd_update(args: &UpdateArgs, json_out: bool) -> Result<()> {
         .or_else(|| std::env::var("APPFLOWY_VERSION").ok())
         .filter(|s| !s.trim().is_empty());
 
+    // GitHub's anonymous API budget is 60 requests/hour per IP — quick to
+    // exhaust behind a shared NAT or in CI — so a GITHUB_TOKEN / GH_TOKEN
+    // in the environment is attached to the API requests (never the
+    // download host, which shouldn't see credentials). Read here, not
+    // inside the request helpers, so they stay hermetic for tests.
+    let github_token = std::env::var("GITHUB_TOKEN")
+        .or_else(|_| std::env::var("GH_TOKEN"))
+        .ok()
+        .filter(|token| !token.trim().is_empty());
+
     let client = http_client()?;
-    let (tag, target) = match pin.as_deref() {
+    // `release` is None for pinned runs: the tag is resolved locally so
+    // `--check` and the up-to-date short-circuit stay network-free, and the
+    // metadata (asset digests) is fetched only when a download is happening.
+    let (tag, target, release) = match pin.as_deref() {
         Some(pin) => {
             let version = parse_version(pin)
                 .ok_or_else(|| Error::Validation(format!("version '{pin}' (want X.Y.Z)")))?;
-            (format!("v{version}"), version)
+            (format!("v{version}"), version, None)
         }
         None => {
-            let tag = resolve_latest_tag(&client, API_BASE).await?;
+            let release = resolve_latest_tag(&client, API_BASE, github_token.as_deref()).await?;
+            let tag = release.tag.clone();
             let version = parse_version(&tag).ok_or_else(|| {
                 Error::Other(format!(
                     "latest release tag '{tag}' is not vX.Y.Z — pass --version to pin a release"
                 ))
             })?;
-            (tag, version)
+            (tag, version, Some(release))
         }
     };
 
@@ -421,7 +565,23 @@ pub async fn cmd_update(args: &UpdateArgs, json_out: bool) -> Result<()> {
 
     cleanup_stale(&dir, &file_name, &stem);
 
-    let bytes = download_asset(&client, DOWNLOAD_BASE, &tag, asset).await?;
+    // Pinned runs fetch the release metadata only now — `--check` and the
+    // up-to-date short-circuit never reach this point. The latest path
+    // already holds it from tag resolution; fetching again would spend
+    // rate-limit budget for nothing.
+    let release = match release {
+        Some(release) => release,
+        None => fetch_release_by_tag(&client, API_BASE, github_token.as_deref(), &tag).await?,
+    };
+
+    let bytes = download_asset(
+        &client,
+        DOWNLOAD_BASE,
+        &tag,
+        asset,
+        release.sha256_digest(asset),
+    )
+    .await?;
 
     let staged = staging_path(&dir, &stem, std::process::id());
     std::fs::write(&staged, &bytes).map_err(|e| {

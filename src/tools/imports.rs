@@ -23,7 +23,9 @@ use serde_json::{json, Value};
 
 use crate::error::{Error, Result as AppResult};
 use crate::server::AppServer;
-use crate::tools::util::{map_tool_error, ToolError};
+use crate::tools::util::{
+    ensure_parent_is_not_workspace, map_tool_error, presigned_upload_client, ToolError,
+};
 
 /// Content type the server signs each document-import presigned URL for;
 /// the PUT must carry the same value or S3 rejects the signature.
@@ -56,10 +58,11 @@ async fn read_import_file(path: &Path) -> AppResult<Vec<u8>> {
 }
 
 /// PUT file bytes to a presigned URL. Presigned URLs carry the signature in
-/// the URL itself, so this uses a standalone client with no Authorization
-/// header. 2xx means success (AppFlowy-Web accepts 200/204).
+/// the URL itself, so this goes through the shared presigned-upload client,
+/// which never sends the Authorization header. 2xx means success
+/// (AppFlowy-Web accepts 200/204).
 async fn put_presigned(presigned_url: &str, content_type: &str, bytes: Vec<u8>) -> AppResult<()> {
-    let response = reqwest::Client::new()
+    let response = presigned_upload_client()
         .put(presigned_url)
         .header(reqwest::header::CONTENT_TYPE, content_type)
         .body(bytes)
@@ -76,12 +79,12 @@ async fn put_presigned(presigned_url: &str, content_type: &str, bytes: Vec<u8>) 
 }
 
 /// PUT one multipart chunk to a presigned part URL and return the ETag the
-/// storage assigns it. Same standalone, no-auth client as [`put_presigned`];
+/// storage assigns it. Same shared, no-auth client as [`put_presigned`];
 /// presigned part URLs do not sign a Content-Type, so none is sent. S3
 /// returns the ETag in a response header, passed verbatim into the
 /// complete-multipart payload.
 async fn put_presigned_part(presigned_url: &str, bytes: &[u8]) -> AppResult<String> {
-    let response = reqwest::Client::new()
+    let response = presigned_upload_client()
         .put(presigned_url)
         .body(bytes.to_vec())
         .send()
@@ -103,8 +106,8 @@ async fn put_presigned_part(presigned_url: &str, bytes: &[u8]) -> AppResult<Stri
 }
 
 /// Multipart branch of the Notion import flow: slice the zip into
-/// `ceil(len / part_count)` chunks and PUT each to its presigned part URL in
-/// the order the server listed them, then complete via
+/// `ceil(len / part_count)` chunks and PUT each to its presigned part URL,
+/// sorted by part_number, then complete via
 /// `POST /api/import/complete-multipart`.
 async fn complete_import_multipart(
     server: &AppServer,
@@ -130,8 +133,12 @@ async fn complete_import_multipart(
         .ok_or_else(|| {
             Error::Other("Import task multipart response is missing part_presigned_urls".into())
         })?;
-    let chunk_size = bytes.len().div_ceil(part_urls.len()).max(1);
-    let mut parts = Vec::with_capacity(part_urls.len());
+    // Collect (part_number, presigned_url) pairs, then sort by part_number
+    // BEFORE slicing byte ranges: the ranges are assigned by position below,
+    // so if the server ever lists the parts out of order, the bytes would
+    // land in the wrong parts and the assembled zip would be silently
+    // corrupt. Stable sort keeps equal numbers in arrival order.
+    let mut ordered: Vec<(u64, &str)> = Vec::with_capacity(part_urls.len());
     for (index, part) in part_urls.iter().enumerate() {
         let part_number = part
             .get("part_number")
@@ -150,6 +157,12 @@ async fn complete_import_multipart(
                     "Import task multipart part {part_number} is missing presigned_url"
                 ))
             })?;
+        ordered.push((part_number, presigned_url));
+    }
+    ordered.sort_by_key(|&(part_number, _)| part_number);
+    let chunk_size = bytes.len().div_ceil(ordered.len()).max(1);
+    let mut parts = Vec::with_capacity(ordered.len());
+    for (index, (part_number, presigned_url)) in ordered.iter().enumerate() {
         let start = index * chunk_size;
         let end = ((index + 1) * chunk_size).min(bytes.len());
         let chunk = if start < end {
@@ -359,6 +372,18 @@ impl AppServer {
             return Err(ToolError::validation(format!(
                 "layout must be one of \"grid\", \"board\", \"calendar\", got \"{layout}\""
             )));
+        }
+        // Same guard the content tools apply (util.rs): the workspace root
+        // view_id equals the workspace_id, and anything created directly
+        // under it becomes a Space instead of landing inside one — reject
+        // it before staging the file.
+        if let Some(parent_view_id) = request
+            .parent_view_id
+            .as_deref()
+            .filter(|parent_view_id| !parent_view_id.is_empty())
+        {
+            ensure_parent_is_not_workspace(&request.workspace_id, parent_view_id)
+                .map_err(map_tool_error)?;
         }
         let bytes = read_import_file(path).await.map_err(map_tool_error)?;
         let name = request

@@ -43,6 +43,14 @@ fn validate_space_permission(space_permission: i64) -> Result<(), ToolError> {
     Ok(())
 }
 
+/// Space name guard: `Option<String>` alone only blocks `None`, while
+/// `Some("")` / whitespace would reach the API (and rename a space to
+/// nothing). Same filter + clear-message shape as member.rs's workspace_name.
+fn require_space_name(name: Option<String>) -> Result<String, ToolError> {
+    name.filter(|name| !name.trim().is_empty())
+        .ok_or_else(|| ToolError::validation("name is required and must not be empty."))
+}
+
 #[derive(Debug, Default, Deserialize, rmcp::schemars::JsonSchema)]
 #[serde(default)]
 pub struct GetWorkspaceFolderParams {
@@ -194,9 +202,7 @@ impl AppServer {
         &self,
         Parameters(request): Parameters<CreateSpaceRequest>,
     ) -> Result<Json<Value>, ToolError> {
-        let name = request
-            .name
-            .ok_or_else(|| ToolError::validation("name is required."))?;
+        let name = require_space_name(request.name)?;
         validate_space_permission(request.space_permission)?;
         let data = self
             .client
@@ -227,9 +233,9 @@ impl AppServer {
         &self,
         Parameters(request): Parameters<UpdateSpaceRequest>,
     ) -> Result<Json<Value>, ToolError> {
-        let name = request
-            .name
-            .ok_or_else(|| ToolError::validation("name is required."))?;
+        // Same as create: a blank name must not reach the API (it would
+        // rename the space to empty whitespace).
+        let name = require_space_name(request.name)?;
         validate_space_permission(request.space_permission)?;
         let data = self
             .client
@@ -250,5 +256,25 @@ impl AppServer {
             .await
             .map_err(map_tool_error)?;
         Ok(Json(data))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn space_name_rejects_missing_and_blank() {
+        // `ok_or_else` alone only blocked None; Some("") used to reach the
+        // API and create/rename a space to nothing.
+        let rejected = [None, Some(String::new()), Some("   ".into())];
+        for name in rejected {
+            assert!(
+                require_space_name(name.clone()).is_err(),
+                "{name:?} should be rejected"
+            );
+        }
+        let accepted = require_space_name(Some("My Space".into()));
+        assert!(matches!(accepted, Ok(name) if name == "My Space"));
     }
 }

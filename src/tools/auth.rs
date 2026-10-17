@@ -45,7 +45,9 @@ impl AppServer {
         if self.client.email().await.is_none() || self.client.password().await.is_none() {
             return Err(ToolError::validation("Email and password must be provided either in the request or via APPFLOWY_EMAIL and APPFLOWY_PASSWORD env vars"));
         }
-        self.client.login().await.map_err(map_tool_error)?;
+        // Locked variant: serializes against 401-triggered reauth so the two
+        // never race on the rotating refresh token.
+        self.client.login_locked().await.map_err(map_tool_error)?;
         Ok(Json(json!({ "status": "authenticated" })))
     }
 
@@ -60,7 +62,11 @@ impl AppServer {
         if let Some(token) = request.refresh_token {
             self.client.set_refresh_token(Some(token)).await;
         }
-        self.client.refresh_token().await.map_err(map_tool_error)?;
+        // Locked variant: see the comment in `appflowy_login`.
+        self.client
+            .refresh_token_locked()
+            .await
+            .map_err(map_tool_error)?;
         Ok(Json(json!({ "status": "refreshed" })))
     }
 }

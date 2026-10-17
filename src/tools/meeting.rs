@@ -10,7 +10,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::server::AppServer;
-use crate::tools::util::{expand_tilde, map_tool_error, ToolError};
+use crate::tools::util::{expand_tilde, map_tool_error, presigned_upload_client, ToolError};
 
 #[derive(Debug, Default, Deserialize, rmcp::schemars::JsonSchema)]
 #[serde(default)]
@@ -119,9 +119,10 @@ async fn upload_audio(
         })?;
 
     // The presigned URL carries its own authorization (per the web client's
-    // comment); a standalone client is used so the bearer token is NEVER
-    // sent to the storage backend.
-    let response = reqwest::Client::new()
+    // comment); the shared presigned-upload client is used so the bearer
+    // token is NEVER sent to the storage backend (and so the connection
+    // pool plus upload timeouts survive across calls).
+    let response = presigned_upload_client()
         .put(upload_url)
         .header(reqwest::header::CONTENT_TYPE, content_type)
         .body(bytes)

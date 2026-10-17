@@ -1,7 +1,6 @@
 //! File upload tool (`appflowy_upload_file`).
 
 use std::io::ErrorKind;
-use std::path::PathBuf;
 
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{tool, tool_router, Json};
@@ -10,24 +9,10 @@ use serde_json::Value;
 
 use crate::client::MULTIPART_CHUNK_SIZE_BYTES;
 use crate::server::AppServer;
-use crate::tools::util::{map_tool_error, ToolError};
-
-/// Minimal port of Python `Path.expanduser()`: expands a leading `~` (bare,
-/// `~/...`, or `~\...`) against `$USERPROFILE` (Windows) or `$HOME`. The
-/// `~user/...` form is left untouched, as are paths without a leading tilde.
-fn expand_tilde(path: &str) -> PathBuf {
-    let Some(rest) = path.strip_prefix('~') else {
-        return PathBuf::from(path);
-    };
-    if !(rest.is_empty() || rest.starts_with('/') || rest.starts_with('\\')) {
-        return PathBuf::from(path);
-    }
-    let home_var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
-    match std::env::var_os(home_var) {
-        Some(home) => PathBuf::from(home).join(rest.trim_start_matches(['/', '\\'])),
-        None => PathBuf::from(path),
-    }
-}
+// Shared expand_tilde (tools/util.rs): the private copy that used to live
+// here diverged from it on bare `~` (it passed `~` through instead of
+// expanding to the home dir, unlike Python's Path.expanduser).
+use crate::tools::util::{expand_tilde, map_tool_error, ToolError};
 
 /// Mirrors Python `models.py::UploadFileRequest` (workspace_id flattened in).
 #[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
@@ -105,15 +90,20 @@ impl AppServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+
+    // expand_tilde itself now lives in tools/util.rs with its own tests
+    // (including the bare-`~` and missing-home-var cases). Keep a smoke test
+    // here to pin the behavior this tool relies on.
 
     #[test]
-    fn paths_without_tilde_pass_through() {
+    fn upload_paths_without_tilde_pass_through() {
         assert_eq!(expand_tilde("/tmp/a.txt"), PathBuf::from("/tmp/a.txt"));
         assert_eq!(expand_tilde("~user/a.txt"), PathBuf::from("~user/a.txt"));
     }
 
     #[test]
-    fn tilde_expands_to_home() {
+    fn upload_tilde_expands_to_home() {
         // Whatever the home dir is, `~/x` must become an absolute-looking
         // join of it and "x", never a literal tilde.
         let home_var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };

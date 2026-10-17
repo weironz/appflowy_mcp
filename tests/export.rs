@@ -221,7 +221,9 @@ fn test_document_to_markdown_block_types() {
     assert!(md.contains("- [x] done"));
     assert!(md.contains("> quoted"));
     assert!(md.contains("```python\nprint(1)\n```"));
-    assert!(md.contains("---"));
+    // Dividers export as `***` (not `---`): a divider as the first block must
+    // not look like YAML front matter on re-import.
+    assert!(md.contains("***"));
     assert!(md.contains("![cap](https://x/i.png)"));
 }
 

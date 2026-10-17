@@ -12,8 +12,11 @@ use crate::tools::util::{map_tool_error, ToolError};
 /// Faithful port of Python `server.py::quick_note_data`: raw `data` wins over
 /// `text`; text becomes one `paragraph` block per `splitlines()` line. An
 /// empty string still yields a single empty paragraph, matching Python's
-/// `[""]` fallback for empty text.
+/// `[""]` fallback for empty text. JSON `"data": null` deserializes to
+/// `Some(Value::Null)` and counts as absent — like Python's `None` — so it
+/// cannot shadow `text` and silently create an empty note.
 fn quick_note_data(text: Option<&str>, data: Option<&Value>) -> Option<Value> {
+    let data = data.filter(|data| !data.is_null());
     if let Some(data) = data {
         return Some(data.clone());
     }
@@ -113,6 +116,10 @@ impl AppServer {
         &self,
         Parameters(request): Parameters<CreateQuickNoteRequest>,
     ) -> Result<Json<Value>, ToolError> {
+        // Same requirement as update below: without it, an empty request
+        // would POST `{"data": null}` and create a blank note server-side.
+        let data = quick_note_data(request.text.as_deref(), request.data.as_ref())
+            .ok_or_else(|| ToolError::validation("Either text or data is required."))?;
         let data = self
             .client
             .request(
@@ -120,7 +127,7 @@ impl AppServer {
                 &format!("/api/workspace/{}/quick-note", request.workspace_id),
                 None,
                 Some(json!({
-                    "data": quick_note_data(request.text.as_deref(), request.data.as_ref()),
+                    "data": data,
                 })),
             )
             .await
@@ -212,5 +219,21 @@ mod tests {
     #[test]
     fn neither_text_nor_data_is_none() {
         assert!(quick_note_data(None, None).is_none());
+    }
+
+    #[test]
+    fn null_data_does_not_shadow_text() {
+        // JSON `"data": null` arrives as Some(Value::Null) and must behave
+        // like absent data, not like provided data.
+        let result = quick_note_data(Some("hello"), Some(&Value::Null)).unwrap();
+        assert_eq!(
+            result,
+            json!([{"type": "paragraph", "delta": [{"insert": "hello"}]}])
+        );
+    }
+
+    #[test]
+    fn null_data_alone_is_none() {
+        assert!(quick_note_data(None, Some(&Value::Null)).is_none());
     }
 }

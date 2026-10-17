@@ -37,14 +37,6 @@ fn image_pattern() -> &'static Regex {
     })
 }
 
-fn inline_image_pattern() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(r"!\[(?P<alt>[^\]]*)\]\((?P<url>[^)]+)\)")
-            .expect("INLINE_IMAGE_PATTERN must compile")
-    })
-}
-
 fn table_separator_cell_pattern() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| Regex::new(r"^:?-+:?$").expect("TABLE_SEPARATOR_CELL_PATTERN must compile"))
@@ -122,17 +114,241 @@ impl Block {
 ///   literal X (this is the set the exporter escapes); any other `\X` keeps
 ///   its backslash. Escapes are honored everywhere except code spans
 ///   (verbatim) and link URLs (copied raw up to the first `)`).
+///
+/// Inline `![alt](url)` images have no delta representation, so they degrade
+/// to their literal syntax as a plain op — nothing is lost, and the exporter
+/// re-escapes the brackets so the text round-trips. Callers that can split
+/// into multiple blocks use [`parse_rich_blocks`] instead, which emits real
+/// image blocks.
 pub fn parse_rich_text(text: &str) -> Vec<DeltaOp> {
     if text.is_empty() {
         return vec![DeltaOp::plain("")];
     }
-    parse_inline(text, &Map::new())
+    let events = parse_inline_events(text, &Map::new());
+    let mut ops = Vec::with_capacity(events.len());
+    for event in events {
+        match event {
+            RichEvent::Op(op) => ops.push(op),
+            RichEvent::Image { alt, url } => {
+                ops.push(DeltaOp::plain(format!("![{alt}]({url})")));
+            }
+        }
+    }
+    if ops.is_empty() {
+        ops.push(DeltaOp::plain(""));
+    }
+    ops
 }
 
-/// Characters import un-escapes after a backslash. Kept in sync with
-/// `crate::render::escape_inline` — the exporter escapes exactly this set.
+/// Parse inline markdown into a run of blocks: the rich-text delta, split
+/// around any inline `![alt](url)` images into standalone image blocks (the
+/// delta format has no image op). Image URLs pass through `resolver` like
+/// full-line images do. Callers that render a single-line container (list
+/// items, headings, quotes) use this so images inside them are not silently
+/// flattened into `!` + link; the first block is the container's own text
+/// run and any further blocks are the trailing images/paragraphs.
+fn parse_rich_blocks(text: &str, resolver: Option<&mut ImageUrlResolver<'_>>) -> Vec<Block> {
+    if text.is_empty() {
+        return vec![paragraph_block("")];
+    }
+    let mut resolver = resolver;
+    let events = parse_inline_events(text, &Map::new());
+    if !events.iter().any(|e| matches!(e, RichEvent::Image { .. })) {
+        let ops = events
+            .into_iter()
+            .filter_map(|e| match e {
+                RichEvent::Op(op) => Some(op),
+                RichEvent::Image { .. } => None,
+            })
+            .collect();
+        return vec![Block::new("paragraph", delta_data(ops))];
+    }
+    // Events hold delta ops and images interleaved in text order; a plain run
+    // accumulates ops until an image breaks it. When the text opens with an
+    // image, an empty paragraph still leads the run: container callers (list
+    // items, headings, quotes) take their delta from the first block.
+    let mut blocks = Vec::new();
+    let mut run: Vec<DeltaOp> = Vec::new();
+    if matches!(events.first(), Some(RichEvent::Image { .. })) {
+        blocks.push(paragraph_block(""));
+    }
+    for event in events {
+        match event {
+            RichEvent::Op(op) => run.push(op),
+            RichEvent::Image { alt, url } => {
+                let has_text = run.iter().any(|op| !op.insert.is_empty());
+                if has_text {
+                    blocks.push(Block::new(
+                        "paragraph",
+                        delta_data(std::mem::take(&mut run)),
+                    ));
+                } else {
+                    run.clear();
+                }
+                let image_url = match resolver.as_deref_mut() {
+                    Some(resolve) => resolve(&url, &alt),
+                    None => url,
+                };
+                blocks.push(image_block(image_url, alt));
+            }
+        }
+    }
+    if !run.iter().all(|op| op.insert.is_empty()) {
+        blocks.push(Block::new("paragraph", delta_data(run)));
+    }
+    blocks
+}
+
+/// One inline parse event: a delta op, or an image that must break out of the
+/// delta (emitted in exactly the order they occur in the text).
+enum RichEvent {
+    Op(DeltaOp),
+    Image { alt: String, url: String },
+}
+
+/// Recursive body of [`parse_rich_text`]: every op emitted here carries the
+/// container attributes in `extra` merged with the marks found at this
+/// level. The merge order mirrors `render::delta_to_markdown`'s wrapping
+/// (code -> bold -> italic -> strike -> href from the inside out), which is
+/// what makes export-then-import stable.
+///
+/// Inline images are emitted as `Image` events at the position they occur;
+/// the delta cannot carry them, so the caller decides how to split.
+fn parse_inline_events(text: &str, extra: &Map<String, Value>) -> Vec<RichEvent> {
+    let mut events: Vec<RichEvent> = Vec::new();
+    let mut plain = String::new();
+    let bytes = text.as_bytes();
+    let mut i = 0usize;
+
+    let flush = |events: &mut Vec<RichEvent>, plain: &mut String| {
+        if !plain.is_empty() {
+            let text = std::mem::take(plain);
+            events.push(if extra.is_empty() {
+                RichEvent::Op(DeltaOp::plain(text))
+            } else {
+                RichEvent::Op(DeltaOp::with_attributes(text, extra.clone()))
+            });
+        }
+    };
+    let push_op = |events: &mut Vec<RichEvent>, insert: &str, key: &str, value: Value| {
+        let mut attrs = extra.clone();
+        attrs.insert(key.to_string(), value);
+        events.push(if attrs.is_empty() {
+            RichEvent::Op(DeltaOp::plain(insert))
+        } else {
+            RichEvent::Op(DeltaOp::with_attributes(insert, attrs))
+        });
+    };
+
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'\\' && i + 1 < bytes.len() && is_escapable(bytes[i + 1]) {
+            // Recognized escape: literal X, drop the backslash.
+            plain.push(bytes[i + 1] as char);
+            i += 2;
+            continue;
+        }
+        match b {
+            b'`' => match try_code(text, i) {
+                Some((content, end)) => {
+                    flush(&mut events, &mut plain);
+                    push_op(&mut events, content, "code", json!(true));
+                    i = end;
+                }
+                None => {
+                    plain.push('`');
+                    i += 1;
+                }
+            },
+            b'!' if bytes.get(i + 1) == Some(&b'[') => {
+                // Inline image: emitted as an Image event at this position;
+                // the caller splits the delta around it (or keeps the
+                // literal syntax, see `parse_rich_text`).
+                match try_image(text, i) {
+                    Some((alt, url, end)) => {
+                        flush(&mut events, &mut plain);
+                        events.push(RichEvent::Image {
+                            alt: alt.to_string(),
+                            url: url.to_string(),
+                        });
+                        i = end;
+                    }
+                    None => {
+                        plain.push('!');
+                        i += 1;
+                    }
+                }
+            }
+            b'[' => match try_link(text, i) {
+                Some((link_text, url, end)) => {
+                    flush(&mut events, &mut plain);
+                    let mut attrs = extra.clone();
+                    attrs.insert("href".to_string(), json!(url));
+                    let nested = parse_inline_events(link_text, &attrs);
+                    events.extend(nested);
+                    i = end;
+                }
+                None => {
+                    plain.push('[');
+                    i += 1;
+                }
+            },
+            b'*' => {
+                let pair = bytes.get(i + 1) == Some(&b'*');
+                let (width, key) = if pair { (2, "bold") } else { (1, "italic") };
+                match try_container(text, i, b'*', width) {
+                    Some((content, end)) => {
+                        flush(&mut events, &mut plain);
+                        let mut attrs = extra.clone();
+                        attrs.insert(key.to_string(), json!(true));
+                        let nested = parse_inline_events(content, &attrs);
+                        events.extend(nested);
+                        i = end;
+                    }
+                    // On a failed `**` only the first star goes literal; the
+                    // second is re-examined (it may still open italic).
+                    None => {
+                        plain.push('*');
+                        i += 1;
+                    }
+                }
+            }
+            b'~' if bytes.get(i + 1) == Some(&b'~') => match try_container(text, i, b'~', 2) {
+                Some((content, end)) => {
+                    flush(&mut events, &mut plain);
+                    let mut attrs = extra.clone();
+                    attrs.insert("strikethrough".to_string(), json!(true));
+                    let nested = parse_inline_events(content, &attrs);
+                    events.extend(nested);
+                    i = end;
+                }
+                None => {
+                    plain.push('~');
+                    i += 1;
+                }
+            },
+            // Non-ASCII bytes are UTF-8 sequences; step by whole chars.
+            _ => {
+                let ch = text[i..].chars().next().expect("non-empty tail");
+                plain.push(ch);
+                i += ch.len_utf8();
+            }
+        }
+    }
+    flush(&mut events, &mut plain);
+    events
+}
+
+/// Characters import un-escapes after a backslash. Kept in sync with the
+/// exporter: `crate::render::escape_inline` escapes `` \ ` * [ ] ~ `` on
+/// every plain run, and the paragraph renderer additionally escapes
+/// line-initial `#`, `-`, `>`, `.` and `$` (block markers) — both sides must
+/// agree or exported escapes surface as literal backslashes.
 fn is_escapable(b: u8) -> bool {
-    matches!(b, b'\\' | b'`' | b'*' | b'[' | b']')
+    matches!(
+        b,
+        b'\\' | b'`' | b'*' | b'[' | b']' | b'~' | b'#' | b'-' | b'>' | b'.' | b'$'
+    )
 }
 
 /// Next index of `marker` at or after `from`, treating `\X` (X escapable)
@@ -161,13 +377,48 @@ fn try_code(text: &str, start: usize) -> Option<(&str, usize)> {
     Some((&text[start + 1..start + 1 + offset], start + 2 + offset))
 }
 
-/// `[text](url)`: the text runs to the first un-escaped `]` and must be
-/// non-empty (`\]` may appear inside); the URL is the non-empty run up to
-/// the first raw `)` — a literal `)` inside a URL is not representable,
-/// same as the old `[^)]+` pattern. Returns (text, url, end-exclusive).
+/// `[text](url)`: the text runs to the first un-escaped `]` followed by `(`,
+/// and must be non-empty (`\]` may appear inside); the URL is the non-empty
+/// run up to the first raw `)` — a literal `)` inside a URL is not
+/// representable, same as the old `[^)]+` pattern. When no un-escaped `]`
+/// exists at all, the first `\]` followed by `(` closes instead: the
+/// exporter escapes `]` inside link text, so `[a\](u)` is how a link whose
+/// label ends in `]` is spelled; the recursive parse of the text un-escapes
+/// the `\]` back to a literal `]`. Returns (text, url, end-exclusive).
 fn try_link(text: &str, start: usize) -> Option<(&str, &str, usize)> {
-    let close = find_unescaped(text, start + 1, b']', false)?;
-    if close == start + 1 || text.as_bytes().get(close + 1) != Some(&b'(') {
+    let bytes = text.as_bytes();
+    let mut close = None;
+    let mut i = start + 1;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' && i + 1 < bytes.len() && is_escapable(bytes[i + 1]) {
+            i += 2;
+            continue;
+        }
+        if bytes[i] == b']' {
+            close = Some(i);
+            break;
+        }
+        i += 1;
+    }
+    let close = match close {
+        Some(close) if bytes.get(close + 1) == Some(&b'(') => close,
+        // A `]` not followed by `(` can't close a link — literal text.
+        Some(_) => return None,
+        None => {
+            // Fallback closer: an escaped `\]` directly before `(`.
+            let mut i = start + 1;
+            let mut escaped = None;
+            while i + 1 < bytes.len() {
+                if bytes[i] == b'\\' && bytes[i + 1] == b']' && bytes.get(i + 2) == Some(&b'(') {
+                    escaped = Some(i);
+                    break;
+                }
+                i += 1;
+            }
+            escaped?
+        }
+    };
+    if close == start + 1 {
         return None;
     }
     let url_start = close + 2;
@@ -177,6 +428,27 @@ fn try_link(text: &str, start: usize) -> Option<(&str, &str, usize)> {
     }
     Some((
         &text[start + 1..close],
+        &text[url_start..url_end],
+        url_end + 1,
+    ))
+}
+
+/// `![alt](url)`: like [`try_link`] with a leading `!`; the alt may be empty,
+/// the URL may not. Returns (alt, url, end-exclusive).
+fn try_image(text: &str, start: usize) -> Option<(&str, &str, usize)> {
+    let bytes = text.as_bytes();
+    debug_assert!(bytes[start] == b'!' && bytes.get(start + 1) == Some(&b'['));
+    let close = find_unescaped(text, start + 2, b']', false)?;
+    if bytes.get(close + 1) != Some(&b'(') {
+        return None;
+    }
+    let url_start = close + 2;
+    let url_end = url_start + text[url_start..].find(')')?;
+    if url_end == url_start {
+        return None;
+    }
+    Some((
+        &text[start + 2..close],
         &text[url_start..url_end],
         url_end + 1,
     ))
@@ -196,120 +468,23 @@ fn try_container(text: &str, start: usize, marker: u8, width: usize) -> Option<(
     Some((&text[content_start..end], end + width))
 }
 
-/// Recursive body of [`parse_rich_text`]: every op emitted here carries the
-/// container attributes in `extra` merged with the marks found at this
-/// level. The merge order mirrors `render::delta_to_markdown`'s wrapping
-/// (code -> bold -> italic -> strike -> href from the inside out), which is
-/// what makes export-then-import stable.
-fn parse_inline(text: &str, extra: &Map<String, Value>) -> Vec<DeltaOp> {
-    let mut ops: Vec<DeltaOp> = Vec::new();
-    let mut plain = String::new();
-    let bytes = text.as_bytes();
-    let mut i = 0usize;
-
-    let flush = |ops: &mut Vec<DeltaOp>, plain: &mut String| {
-        if !plain.is_empty() {
-            let text = std::mem::take(plain);
-            ops.push(if extra.is_empty() {
-                DeltaOp::plain(text)
-            } else {
-                DeltaOp::with_attributes(text, extra.clone())
-            });
-        }
-    };
-    let push_op = |ops: &mut Vec<DeltaOp>, insert: &str, key: &str, value: Value| {
-        let mut attrs = extra.clone();
-        attrs.insert(key.to_string(), value);
-        ops.push(if attrs.is_empty() {
-            DeltaOp::plain(insert)
-        } else {
-            DeltaOp::with_attributes(insert, attrs)
-        });
-    };
-
-    while i < bytes.len() {
-        let b = bytes[i];
-        if b == b'\\' && i + 1 < bytes.len() && is_escapable(bytes[i + 1]) {
-            // Recognized escape: literal X, drop the backslash.
-            plain.push(bytes[i + 1] as char);
-            i += 2;
-            continue;
-        }
-        match b {
-            b'`' => match try_code(text, i) {
-                Some((content, end)) => {
-                    flush(&mut ops, &mut plain);
-                    push_op(&mut ops, content, "code", json!(true));
-                    i = end;
-                }
-                None => {
-                    plain.push('`');
-                    i += 1;
-                }
-            },
-            b'[' => match try_link(text, i) {
-                Some((link_text, url, end)) => {
-                    flush(&mut ops, &mut plain);
-                    let mut attrs = extra.clone();
-                    attrs.insert("href".to_string(), json!(url));
-                    ops.extend(parse_inline(link_text, &attrs));
-                    i = end;
-                }
-                None => {
-                    plain.push('[');
-                    i += 1;
-                }
-            },
-            b'*' => {
-                let pair = bytes.get(i + 1) == Some(&b'*');
-                let (width, key) = if pair { (2, "bold") } else { (1, "italic") };
-                match try_container(text, i, b'*', width) {
-                    Some((content, end)) => {
-                        flush(&mut ops, &mut plain);
-                        let mut attrs = extra.clone();
-                        attrs.insert(key.to_string(), json!(true));
-                        ops.extend(parse_inline(content, &attrs));
-                        i = end;
-                    }
-                    // On a failed `**` only the first star goes literal; the
-                    // second is re-examined (it may still open italic).
-                    None => {
-                        plain.push('*');
-                        i += 1;
-                    }
-                }
-            }
-            b'~' if bytes.get(i + 1) == Some(&b'~') => match try_container(text, i, b'~', 2) {
-                Some((content, end)) => {
-                    flush(&mut ops, &mut plain);
-                    let mut attrs = extra.clone();
-                    attrs.insert("strikethrough".to_string(), json!(true));
-                    ops.extend(parse_inline(content, &attrs));
-                    i = end;
-                }
-                None => {
-                    plain.push('~');
-                    i += 1;
-                }
-            },
-            // Non-ASCII bytes are UTF-8 sequences; step by whole chars.
-            _ => {
-                let ch = text[i..].chars().next().expect("non-empty tail");
-                plain.push(ch);
-                i += ch.len_utf8();
-            }
-        }
-    }
-    flush(&mut ops, &mut plain);
-    ops
-}
-
 // ---------------------------------------------------------------------------
 // Block builders (mirror _heading_block/_paragraph_block/... in Python)
 // ---------------------------------------------------------------------------
 
 fn delta_data(ops: Vec<DeltaOp>) -> Value {
     json!({ "delta": ops })
+}
+
+/// The delta array inside a block built by `parse_rich_blocks` (its first
+/// block is always a paragraph whose data is `{"delta": [...]}`).
+fn delta_ops_of(block: &Block) -> Vec<DeltaOp> {
+    block
+        .data
+        .get("delta")
+        .cloned()
+        .and_then(|delta| serde_json::from_value(delta).ok())
+        .unwrap_or_default()
 }
 
 pub fn heading_block(level: usize, text: &str) -> Block {
@@ -432,16 +607,46 @@ fn is_table_separator(line: &str) -> bool {
 
 /// Strip YAML front matter: if the first line is `---`, drop everything up to
 /// and including the next `---` line; keep the input unchanged if no closing
-/// marker exists.
-fn strip_front_matter(lines: &mut Vec<String>) {
+/// marker exists. Every line between the markers must look like YAML (`key:
+/// value`, `key:` or a `#` comment) — a lone `---` followed by plain content
+/// is a leading divider + text, and stripping it would silently eat that
+/// content (the exporter emits leading dividers as `***` precisely so a
+/// genuine front matter stays unambiguous, but third-party Markdown may
+/// still lead with a divider).
+fn strip_front_matter(lines: &mut Vec<&str>) {
     if lines.first().map(|l| l.trim()) != Some("---") {
         return;
     }
     for idx in 1..lines.len() {
-        if lines[idx].trim() == "---" {
-            lines.drain(..=idx);
+        let line = lines[idx].trim();
+        if line == "---" {
+            let is_front_matter = lines[1..idx].iter().all(|l| looks_like_yaml(l.trim()));
+            if is_front_matter {
+                lines.drain(..=idx);
+            }
+            // Not front matter: leave the lines untouched; the leading `---`
+            // parses as a divider further down.
             return;
         }
+    }
+}
+
+/// A line plausible inside YAML front matter: `key: value`, `key:`, a `#`
+/// comment, or blank (blank lines never appear — the caller filters them —
+/// but tolerate one defensively).
+fn looks_like_yaml(line: &str) -> bool {
+    if line.is_empty() || line.starts_with('#') {
+        return true;
+    }
+    // A key is a non-empty run without `:`, followed by `:` + space or EOL.
+    match line.find(':') {
+        Some(colon) => {
+            let key = &line[..colon];
+            !key.is_empty()
+                && !key.starts_with(' ')
+                && (colon + 1 == line.len() || line.as_bytes().get(colon + 1) == Some(&b' '))
+        }
+        None => false,
     }
 }
 
@@ -519,13 +724,15 @@ pub fn parse_markdown_to_blocks(
         list_stack.push((level, path));
     }
 
-    let mut lines: Vec<String> = content.lines().map(str::to_string).collect();
+    // `&str` borrows, not owned Strings: the loop below re-clones lines only
+    // where they actually outlive the iteration (code blocks, tables).
+    let mut lines: Vec<&str> = content.lines().collect();
     strip_front_matter(&mut lines);
     let total = lines.len();
     let mut i = 0usize;
 
     while i < total {
-        let line = lines[i].clone();
+        let line = lines[i];
         let stripped = line.trim();
 
         if let Some(fence_info) = stripped.strip_prefix("```") {
@@ -550,7 +757,7 @@ pub fn parse_markdown_to_blocks(
         }
 
         if in_code_block {
-            code_lines.push(line.clone());
+            code_lines.push(line.to_string());
             i += 1;
             continue;
         }
@@ -570,16 +777,16 @@ pub fn parse_markdown_to_blocks(
             continue;
         }
 
-        if stripped.starts_with('|') && i + 1 < total && is_table_separator(&lines[i + 1]) {
-            let header = lines[i].clone();
+        if stripped.starts_with('|') && i + 1 < total && is_table_separator(lines[i + 1]) {
+            let header = lines[i];
             let mut body: Vec<String> = Vec::new();
             let mut j = i + 2;
             while j < total && lines[j].trim().starts_with('|') {
-                body.push(lines[j].clone());
+                body.push(lines[j].to_string());
                 j += 1;
             }
             list_stack.clear();
-            blocks.push(table_block(&header, &body));
+            blocks.push(table_block(header, &body));
             i = j;
             continue;
         }
@@ -588,7 +795,7 @@ pub fn parse_markdown_to_blocks(
             let mut formula_lines: Vec<&str> = Vec::new();
             let mut j = i + 1;
             while j < total && lines[j].trim() != "$$" {
-                formula_lines.push(&lines[j]);
+                formula_lines.push(lines[j]);
                 j += 1;
             }
             list_stack.clear();
@@ -623,22 +830,34 @@ pub fn parse_markdown_to_blocks(
             let level = heading.get(1).map(|m| m.as_str().len()).unwrap_or(0);
             let text = heading.get(2).map(|m| m.as_str()).unwrap_or("");
             list_stack.clear();
-            blocks.push(heading_block(level, text));
+            // Inline images inside the heading text break out as trailing
+            // blocks (the heading delta cannot carry them).
+            let mut run = parse_rich_blocks(text, resolver.as_deref_mut());
+            let head = run.first().cloned().unwrap_or_else(|| paragraph_block(""));
+            blocks.push(Block::with_children(
+                "heading",
+                json!({ "level": level, "delta": head.data.get("delta").cloned().unwrap_or(json!([])) }),
+                run.drain(1..).collect(),
+            ));
             i += 1;
             continue;
         }
 
         if stripped.starts_with("- [ ] ") || stripped.starts_with("- [x] ") {
+            let mut run = parse_rich_blocks(&stripped[6..], resolver.as_deref_mut());
+            let head = run.first().cloned().unwrap_or_else(|| paragraph_block(""));
+            let extra: Vec<Block> = run.drain(1..).collect();
             push_list_item(
                 &mut blocks,
                 &mut list_stack,
-                list_indent_level(&line),
-                Block::new(
+                list_indent_level(line),
+                Block::with_children(
                     "todo_list",
                     json!({
                         "checked": stripped.starts_with("- [x] "),
-                        "delta": parse_rich_text(&stripped[6..]),
+                        "delta": head.data.get("delta").cloned().unwrap_or(json!([])),
                     }),
+                    extra,
                 ),
             );
             i += 1;
@@ -646,11 +865,14 @@ pub fn parse_markdown_to_blocks(
         }
 
         if stripped.starts_with("- ") || stripped.starts_with("* ") {
+            let mut run = parse_rich_blocks(&stripped[2..], resolver.as_deref_mut());
+            let head = run.first().cloned().unwrap_or_else(|| paragraph_block(""));
+            let extra: Vec<Block> = run.drain(1..).collect();
             push_list_item(
                 &mut blocks,
                 &mut list_stack,
-                list_indent_level(&line),
-                Block::new("bulleted_list", delta_data(parse_rich_text(&stripped[2..]))),
+                list_indent_level(line),
+                Block::with_children("bulleted_list", delta_data(delta_ops_of(&head)), extra),
             );
             i += 1;
             continue;
@@ -658,11 +880,14 @@ pub fn parse_markdown_to_blocks(
 
         if let Some(ordered) = ordered_list_pattern().captures(stripped) {
             let text = ordered.get(1).map(|m| m.as_str()).unwrap_or("");
+            let mut run = parse_rich_blocks(text, resolver.as_deref_mut());
+            let head = run.first().cloned().unwrap_or_else(|| paragraph_block(""));
+            let extra: Vec<Block> = run.drain(1..).collect();
             push_list_item(
                 &mut blocks,
                 &mut list_stack,
-                list_indent_level(&line),
-                Block::new("numbered_list", delta_data(parse_rich_text(text))),
+                list_indent_level(line),
+                Block::with_children("numbered_list", delta_data(delta_ops_of(&head)), extra),
             );
             i += 1;
             continue;
@@ -670,7 +895,14 @@ pub fn parse_markdown_to_blocks(
 
         if let Some(quote_text) = stripped.strip_prefix("> ") {
             list_stack.clear();
-            blocks.push(Block::new("quote", delta_data(parse_rich_text(quote_text))));
+            let run = parse_rich_blocks(quote_text, resolver.as_deref_mut());
+            let mut run_iter = run.into_iter();
+            let head = run_iter.next().unwrap_or_else(|| paragraph_block(""));
+            blocks.push(Block::with_children(
+                "quote",
+                delta_data(delta_ops_of(&head)),
+                run_iter.collect(),
+            ));
             i += 1;
             continue;
         }
@@ -678,7 +910,7 @@ pub fn parse_markdown_to_blocks(
         if !stripped.is_empty() {
             list_stack.clear();
         }
-        blocks.extend(blocks_from_inline_images(&line, resolver.as_deref_mut()));
+        blocks.extend(parse_rich_blocks(line, resolver.as_deref_mut()));
         i += 1;
     }
 
@@ -690,48 +922,6 @@ pub fn parse_markdown_to_blocks(
                 "delta": [{ "insert": code_lines.join("\n") }],
             }),
         ));
-    }
-
-    blocks
-}
-
-/// Split a fallback paragraph line around inline image syntax, emitting an
-/// image block (with resolved URL) per `![alt](url)` and paragraph blocks for
-/// the surrounding text. Mirrors `_blocks_from_inline_images`.
-fn blocks_from_inline_images(
-    line: &str,
-    resolver: Option<&mut ImageUrlResolver<'_>>,
-) -> Vec<Block> {
-    let mut resolver = resolver;
-    let mut blocks: Vec<Block> = Vec::new();
-    let mut last_end = 0usize;
-
-    for caps in inline_image_pattern().captures_iter(line) {
-        let m = match caps.get(0) {
-            Some(m) => m,
-            None => continue,
-        };
-        let (start, end) = (m.start(), m.end());
-        if start > last_end {
-            blocks.push(paragraph_block(&line[last_end..start]));
-        }
-
-        let alt = caps.name("alt").map(|m| m.as_str()).unwrap_or("");
-        let url = caps.name("url").map(|m| m.as_str()).unwrap_or("");
-        let image_url = match resolver.as_deref_mut() {
-            Some(resolve) => resolve(url, alt),
-            None => url.to_string(),
-        };
-        blocks.push(image_block(image_url, alt.to_string()));
-        last_end = end;
-    }
-
-    if blocks.is_empty() {
-        return vec![paragraph_block(line)];
-    }
-
-    if last_end < line.len() {
-        blocks.push(paragraph_block(&line[last_end..]));
     }
 
     blocks

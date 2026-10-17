@@ -280,8 +280,11 @@ impl AppServer {
             .await
             .map_err(map_tool_error)?;
         // Python follows the publish with a GET of the published info and
-        // returns that; keep both calls and the return shape.
-        let info = self
+        // returns that. The publish POST already succeeded, so an info GET
+        // failure (e.g. an eventual-consistency 404) must NOT fail the tool:
+        // the caller would reasonably re-publish an already-published page.
+        // Return success with a warning instead.
+        match self
             .client
             .request(
                 Method::GET,
@@ -290,8 +293,18 @@ impl AppServer {
                 None,
             )
             .await
-            .map_err(map_tool_error)?;
-        Ok(Json(info))
+        {
+            Ok(info) => Ok(Json(info)),
+            Err(err) => Ok(Json(json!({
+                "page_id": params.page_id,
+                "status": "published",
+                "warning": format!(
+                    "Page published, but fetching its published info failed \
+                     (the page is likely published; re-publishing would duplicate \
+                     it): {err}"
+                ),
+            }))),
+        }
     }
 
     #[tool(

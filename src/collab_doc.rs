@@ -42,7 +42,7 @@ use yrs::types::text::TextPrelim;
 use yrs::types::{Attrs, Delta};
 use yrs::{
     Any, Array, ArrayPrelim, ArrayRef, Doc, In, Map, MapPrelim, MapRef, Out, ReadTxn, StateVector,
-    Text, TextRef, TransactionMut, Transact,
+    Text, TextRef, Transact, TransactionMut,
 };
 
 use crate::b64::base64_decode;
@@ -167,6 +167,49 @@ pub fn update_block_text(doc: &Doc, block_id: &str, text: &str) -> Result<String
     Ok(external_id)
 }
 
+/// Convert a JSON value to yrs [`Any`] by reference, avoiding the deep
+/// `value.clone()` that `serde_json::from_value` (taking the value by value)
+/// forced on every rich-text attribute.
+///
+/// Behavior is identical to what yrs' own serde `Deserialize` impl produced:
+/// serde_json feeds its unsigned number repr to `visit_u64` (which yrs only
+/// accepts up to i64::MAX, with this exact error wording), negatives to
+/// `visit_i64`, and floats to `visit_f64`.
+fn json_to_any(value: &Value) -> std::result::Result<Any, String> {
+    Ok(match value {
+        Value::Null => Any::Null,
+        Value::Bool(b) => Any::Bool(*b),
+        Value::Number(n) => {
+            if let Some(u) = n.as_u64() {
+                if u > i64::MAX as u64 {
+                    return Err(format!("Value {u} out of range for i64"));
+                }
+                Any::from(u as i64)
+            } else if let Some(i) = n.as_i64() {
+                Any::from(i)
+            } else {
+                // serde_json keeps every remaining number as an f64.
+                Any::from(n.as_f64().unwrap_or_default())
+            }
+        }
+        Value::String(s) => Any::from(s.as_str()),
+        Value::Array(items) => Any::Array(
+            items
+                .iter()
+                .map(json_to_any)
+                .collect::<std::result::Result<Vec<_>, _>>()?
+                .into(),
+        ),
+        Value::Object(map) => {
+            let mut out = std::collections::HashMap::with_capacity(map.len());
+            for (key, value) in map {
+                out.insert(key.clone(), json_to_any(value)?);
+            }
+            Any::Map(Arc::new(out))
+        }
+    })
+}
+
 /// Insert rich-text ops into a YText. The whole delta goes in through ONE
 /// apply_delta call: its attr bookkeeping (unset_missing /
 /// minimize_attr_changes) opens and closes formatting ranges between chunks.
@@ -186,7 +229,7 @@ fn apply_delta_ops(text_ref: &TextRef, txn: &mut TransactionMut, ops: &[DeltaOp]
             Some(map) => {
                 let mut out = Attrs::new();
                 for (key, value) in map {
-                    let any: Any = serde_json::from_value(value.clone()).map_err(|e| {
+                    let any: Any = json_to_any(value).map_err(|e| {
                         Error::Other(format!(
                             "rich-text attribute {key} not represented in the collab: {e}"
                         ))
@@ -238,18 +281,15 @@ pub fn delete_block_from_parent(doc: &Doc, block_id: &str) -> Result<DeleteOutco
             let Out::YArray(array) = out else {
                 continue;
             };
-            for index in 0..array.len(&txn) {
-                let matches_id = match array.get(&txn, index) {
-                    Some(Out::Any(Any::String(id))) => id.as_ref() == block_id,
-                    Some(other) => other.to_string(&txn) == block_id,
-                    None => false,
-                };
-                if matches_id {
-                    found = Some((key.to_string(), array, index));
-                    break;
-                }
-            }
-            if found.is_some() {
+            // A single linear scan: Array::get(index) re-walks the array
+            // from its head per call, so an index loop over a long children
+            // list is O(n^2).
+            let index = array.iter(&txn).position(|out| match out {
+                Out::Any(Any::String(id)) => id.as_ref() == block_id,
+                other => other.to_string(&txn) == block_id,
+            });
+            if let Some(index) = index {
+                found = Some((key.to_string(), array, index as u32));
                 break;
             }
         }
@@ -417,9 +457,11 @@ pub fn rebuild_document_from_blocks(doc: &Doc, new_blocks: &[Block]) -> Result<R
 
     let mut txn = doc.transact_mut();
     let removed_existing = root_children.len(&txn);
-    for _ in 0..removed_existing {
-        // Remove from the front each round: index stays valid as the array shrinks.
-        root_children.remove(&mut txn, 0);
+    if removed_existing > 0 {
+        // One range removal instead of len × remove(0): each single removal
+        // re-walks all previously accumulated tombstones, making the
+        // one-at-a-time loop O(n^2) in the document's total block count.
+        root_children.remove_range(&mut txn, 0, removed_existing);
     }
 
     let mut outcome = RebuildOutcome {
@@ -821,6 +863,36 @@ mod tests {
     }
 
     #[test]
+    fn json_to_any_matches_serde_deserialization() {
+        // The zero-clone converter must be indistinguishable from what
+        // serde_json::from_value::<Any> produced, including the u64 that
+        // does not fit an i64 (rejected with the same message).
+        for value in [
+            json!(null),
+            json!(true),
+            json!(false),
+            json!(0),
+            json!(42),
+            json!(-42),
+            json!(3.5),
+            json!(i64::MAX),
+            json!(i64::MIN),
+            json!(u64::MAX),
+            json!("text"),
+            json!([1, "two", [3.5], null, {"k": true}]),
+            json!({"bold": true, "n": -7, "nested": {"a": [1, 2]}}),
+        ] {
+            let via_serde = serde_json::from_value::<Any>(value.clone());
+            match json_to_any(&value) {
+                Ok(converted) => assert_eq!(Some(converted), via_serde.ok()),
+                Err(message) => {
+                    assert_eq!(via_serde.err().map(|e| e.to_string()), Some(message))
+                }
+            }
+        }
+    }
+
+    #[test]
     fn snapshot_round_trips() {
         let doc = fixture_doc();
         let envelope = snapshot_envelope(&doc, "ws", "page");
@@ -864,7 +936,11 @@ mod tests {
                 let block = blocks.insert(&mut txn, id, empty_map());
                 block.insert(&mut txn, "ty", In::from("paragraph"));
                 block.insert(&mut txn, "children", In::from(format!("c_{id}").as_str()));
-                block.insert(&mut txn, "external_id", In::from(format!("t_{id}").as_str()));
+                block.insert(
+                    &mut txn,
+                    "external_id",
+                    In::from(format!("t_{id}").as_str()),
+                );
                 text_map.insert(&mut txn, format!("t_{id}").as_str(), TextPrelim::new(text));
             }
             children_map.insert(
@@ -1044,7 +1120,11 @@ mod tests {
         assert_eq!(outcome.rebuilt_blocks, 1);
         assert_eq!(outcome.removed_existing, 3);
         assert_eq!(outcome.warnings.len(), 1);
-        assert!(outcome.warnings[0].contains("simple_table"), "{:?}", outcome.warnings);
+        assert!(
+            outcome.warnings[0].contains("simple_table"),
+            "{:?}",
+            outcome.warnings
+        );
         assert_eq!(root_child_texts(&doc), ["kept"]);
     }
 }

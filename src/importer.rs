@@ -204,7 +204,18 @@ impl MarkdownImporter {
             )));
         }
 
-        if !subtree_has_markdown(&path) {
+        // One DFS decides up front which directories contain Markdown, so
+        // the tree walk consults this set instead of re-walking whole
+        // subtrees at every ancestor level (the per-call walk was
+        // O(n × depth) directory visits). The synchronous filesystem IO
+        // runs off the tokio workers via spawn_blocking.
+        let root = path.clone();
+        let markdown_dirs = tokio::task::spawn_blocking(move || markdown_subtree_dirs(&root))
+            .await
+            // A JoinError is only possible if the DFS panicked (it cannot);
+            // an empty set then means "no Markdown anywhere" — a safe no-op.
+            .unwrap_or_default();
+        if !markdown_dirs.contains(&path) {
             self.warnings.push(format!(
                 "No Markdown files found under {}; nothing was imported.",
                 path.display()
@@ -213,23 +224,34 @@ impl MarkdownImporter {
         }
 
         let root_page = self
-            .import_directory_tree(&path, parent_view_id, upload_assets)
+            .import_directory_tree(&path, parent_view_id, upload_assets, &markdown_dirs)
             .await;
         Ok(self.summary(root_page))
     }
 
     /// Mirrors `_import_directory`. The boxed recursion is required because
-    /// `async fn` cannot recurse directly.
+    /// `async fn` cannot recurse directly. `markdown_dirs` is the
+    /// precomputed set of Markdown-bearing directories (see
+    /// [`Self::import_directory`]) consulted instead of re-walking each
+    /// subtree per level.
     fn import_directory_tree<'a>(
         &'a mut self,
         directory_path: &'a Path,
         parent_view_id: &'a str,
         upload_assets: bool,
+        markdown_dirs: &'a HashSet<PathBuf>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<CreatedPage>> + Send + 'a>> {
         Box::pin(async move {
             // Precondition: the caller has verified this directory has Markdown in
-            // its subtree, so it is worth a page. One scan yields everything we need.
-            let (index_file, markdown_files, child_dirs) = scan_dir(directory_path);
+            // its subtree, so it is worth a page. One scan yields everything we need;
+            // it performs blocking IO, so it runs off the tokio workers.
+            let scan_root = directory_path.to_path_buf();
+            let (index_file, markdown_files, child_dirs) =
+                tokio::task::spawn_blocking(move || scan_dir(&scan_root))
+                    .await
+                    // A JoinError is only possible if scan_dir panicked (it
+                    // cannot); degrade like an unreadable directory.
+                    .unwrap_or_else(|_| (None, Vec::new(), Vec::new()));
             let view_id = Uuid::new_v4().to_string();
             // The document collab is stored with object_id == collab_id, but AppFlowy
             // loads a view's document by view_id. They must match or the page opens
@@ -239,7 +261,7 @@ impl MarkdownImporter {
             let mut asset_count = 0usize;
 
             if let Some(index_file) = &index_file {
-                let content = self.read_markdown(index_file);
+                let content = self.read_markdown(index_file).await;
                 let before = self.uploaded_assets.len();
                 let markdown_dir = index_file.parent().unwrap_or(directory_path);
                 blocks = self
@@ -277,12 +299,12 @@ impl MarkdownImporter {
                 .await;
 
             for child_dir in &child_dirs {
-                if !subtree_has_markdown(child_dir) {
+                if !markdown_dirs.contains(child_dir) {
                     // Asset-only / empty subfolder (e.g. "assets" with just images) —
                     // no document content, so don't create a page for it.
                     continue;
                 }
-                self.import_directory_tree(child_dir, &page_view_id, upload_assets)
+                self.import_directory_tree(child_dir, &page_view_id, upload_assets, markdown_dirs)
                     .await;
             }
 
@@ -302,7 +324,7 @@ impl MarkdownImporter {
         let view_id = Uuid::new_v4().to_string();
         // collab_id must equal view_id; see import_directory_tree for details.
         let collab_id = view_id.clone();
-        let content = self.read_markdown(markdown_path);
+        let content = self.read_markdown(markdown_path).await;
         let before = self.uploaded_assets.len();
         let markdown_dir = markdown_path.parent().unwrap_or(markdown_path);
         let blocks = self
@@ -767,9 +789,16 @@ impl MarkdownImporter {
     }
 
     /// Mirrors `_read_markdown`: decode as UTF-8 with BOM stripping
-    /// (`utf-8-sig`); on invalid UTF-8 warn and decode lossy.
-    fn read_markdown(&mut self, path: &Path) -> String {
-        let bytes = match fs::read(path) {
+    /// (`utf-8-sig`); on invalid UTF-8 warn and decode lossy. The blocking
+    /// `fs::read` runs via `spawn_blocking` so a large file on a slow disk
+    /// cannot stall the tokio workers.
+    async fn read_markdown(&mut self, path: &Path) -> String {
+        let owned = path.to_path_buf();
+        let read = tokio::task::spawn_blocking(move || fs::read(&owned)).await;
+        // A JoinError is only possible if the closure panicked (`fs::read`
+        // cannot); fold it into the ordinary read-error path below.
+        let read = read.unwrap_or_else(|join_error| Err(std::io::Error::other(join_error)));
+        let bytes = match read {
             Ok(bytes) => bytes,
             Err(e) => {
                 // Python would propagate the OSError out of read_text; the
@@ -956,13 +985,41 @@ fn scan_dir(directory_path: &Path) -> (Option<PathBuf>, Vec<PathBuf>, Vec<PathBu
     (index_file, markdown_files, child_dirs)
 }
 
-/// Mirrors `_subtree_has_markdown`.
-fn subtree_has_markdown(directory_path: &Path) -> bool {
+/// Single-DFS replacement for Python's per-call `_subtree_has_markdown`:
+/// collects every directory (reachable from `root` without crossing an
+/// ignored or dot-prefixed child) whose subtree contains at least one
+/// Markdown file. The import walk used to invoke the per-call variant once
+/// per ancestor level, re-walking the whole subtree each time —
+/// O(n × depth) directory visits — so the set is computed once up front and
+/// each level consults it in O(1).
+///
+/// Semantics match `_subtree_has_markdown` exactly for every directory this
+/// flow queries: the ignored/dot filter applies to *children* of a scanned
+/// directory (the start directory itself is always scanned), and children
+/// reached through `scan_dir` are pre-filtered, so an ignored directory is
+/// never looked up in a set built without it.
+fn markdown_subtree_dirs(root: &Path) -> HashSet<PathBuf> {
+    let mut dirs = HashSet::new();
+    collect_markdown_dirs(root, &mut dirs);
+    dirs
+}
+
+/// Post-order DFS marking every Markdown-bearing ancestor. Returns whether
+/// `directory_path`'s subtree holds Markdown so parents inherit the mark.
+fn collect_markdown_dirs(directory_path: &Path, dirs: &mut HashSet<PathBuf>) -> bool {
     let (_, markdown_files, child_dirs) = scan_dir(directory_path);
-    if !markdown_files.is_empty() {
-        return true;
+    let mut has_markdown = !markdown_files.is_empty();
+    for child in &child_dirs {
+        // Visit every child even when this directory already has direct
+        // Markdown: each child needs its own set entry for the level below.
+        if collect_markdown_dirs(child, dirs) {
+            has_markdown = true;
+        }
     }
-    child_dirs.iter().any(|child| subtree_has_markdown(child))
+    if has_markdown {
+        dirs.insert(directory_path.to_path_buf());
+    }
+    has_markdown
 }
 
 // ---------------------------------------------------------------------------
@@ -1268,7 +1325,7 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
-    // -- scan_dir / subtree_has_markdown ------------------------------------
+    // -- scan_dir / markdown_subtree_dirs ------------------------------------
 
     struct Tree {
         root: PathBuf,
@@ -1331,16 +1388,22 @@ mod tests {
     }
 
     #[test]
-    fn subtree_has_markdown_skips_asset_only_and_ignored_dirs() {
+    fn markdown_subtree_dirs_skips_asset_only_and_ignored_dirs() {
         let tree = Tree::build();
-        assert!(subtree_has_markdown(&tree.root));
-        assert!(!subtree_has_markdown(&tree.root.join("assets")));
-        assert!(subtree_has_markdown(&tree.root.join("sub")));
+        let dirs = markdown_subtree_dirs(&tree.root);
+        assert!(dirs.contains(&tree.root));
+        assert!(!dirs.contains(&tree.root.join("assets")));
+        assert!(dirs.contains(&tree.root.join("sub")));
         // The ignored/dot-dir filter applies to *children* of a scanned
         // directory (matching Python): Markdown nested only inside an ignored
-        // child does not count, while querying the ignored dir itself does.
-        assert!(!subtree_has_markdown(&tree.root.join("container")));
-        assert!(subtree_has_markdown(&tree.root.join("node_modules")));
+        // child does not count, while the directory passed as the scan root
+        // itself is always scanned — so an ignored root still lands in the
+        // set built from it (the flow only ever queries pre-filtered
+        // children, so a set built from the import root covers every lookup
+        // it performs).
+        assert!(!dirs.contains(&tree.root.join("container")));
+        assert!(markdown_subtree_dirs(&tree.root.join("node_modules"))
+            .contains(&tree.root.join("node_modules")));
     }
 
     // -- scan_image_references ----------------------------------------------
@@ -1445,8 +1508,8 @@ mod tests {
 
     // -- read_markdown --------------------------------------------------------
 
-    #[test]
-    fn read_markdown_strips_bom_and_decodes_lossy() {
+    #[tokio::test]
+    async fn read_markdown_strips_bom_and_decodes_lossy() {
         let dir = unique_temp_dir("read");
         let mut importer =
             MarkdownImporter::new(AppFlowyClient::new(None, None, "http://127.0.0.1:1"), "ws");
@@ -1455,11 +1518,11 @@ mod tests {
         let mut bytes = vec![0xEF, 0xBB, 0xBF];
         bytes.extend_from_slice("# hi".as_bytes());
         fs::write(&bom_path, &bytes).unwrap();
-        assert_eq!(importer.read_markdown(&bom_path), "# hi");
+        assert_eq!(importer.read_markdown(&bom_path).await, "# hi");
 
         let bad_path = dir.join("bad.md");
         fs::write(&bad_path, [0x66, 0x6F, 0xC3, 0x28]).unwrap(); // invalid UTF-8
-        let text = importer.read_markdown(&bad_path);
+        let text = importer.read_markdown(&bad_path).await;
         assert!(text.contains('\u{FFFD}'));
         assert_eq!(importer.warnings.len(), 1);
         assert!(importer.warnings[0].starts_with("File is not valid UTF-8"));

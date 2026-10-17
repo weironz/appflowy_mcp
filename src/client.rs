@@ -35,6 +35,10 @@ const MULTIPART_MAX_CONCURRENCY: usize = 3;
 /// (AppFlowy-Web `MAX_RETRIES`, its exponential-backoff sequence).
 const MULTIPART_MAX_PART_RETRIES: u32 = 3;
 
+/// Upper bound for a `Retry-After`-driven delay. Server-supplied and
+/// effectively untrusted; large values would stall the tool for minutes.
+const MAX_RETRY_AFTER_SECS: f64 = 60.0;
+
 /// Equivalent of Python's `urllib.parse.quote(s, safe="")`: everything that
 /// is not an RFC 3986 unreserved character gets percent-encoded.
 const PATH_ENCODE_SET: &AsciiSet = &NON_ALPHANUMERIC
@@ -97,10 +101,17 @@ impl AppFlowyClient {
         let base_url = base_url.into();
         Self {
             inner: Arc::new(ClientInner {
+                // The fallback keeps the 60s timeout: silently dropping it
+                // would turn every request into an unbounded wait.
                 http: reqwest::Client::builder()
                     .timeout(Duration::from_secs(60))
                     .build()
-                    .unwrap_or_else(|_| reqwest::Client::new()),
+                    .unwrap_or_else(|_| {
+                        reqwest::Client::builder()
+                            .timeout(Duration::from_secs(60))
+                            .build()
+                            .expect("reqwest client builds with no custom config")
+                    }),
                 email: RwLock::new(email),
                 password: RwLock::new(password),
                 base_url: RwLock::new(base_url.trim_end_matches('/').to_string()),
@@ -200,6 +211,23 @@ impl AppFlowyClient {
         let token: TokenResponse = serde_json::from_value(body)?;
         self.set_token_response(&token).await;
         Ok(token)
+    }
+
+    /// [`Self::refresh_token`] under the reauth lock. The MCP auth tools
+    /// must use this (not the bare call) so an explicit refresh can't race a
+    /// concurrent 401-triggered reauth: both would spend the same rotating
+    /// refresh token, the loser failing spuriously and cascading into a
+    /// password-login fallback.
+    pub async fn refresh_token_locked(&self) -> Result<TokenResponse> {
+        let _guard = self.inner.reauth_lock.lock().await;
+        self.refresh_token().await
+    }
+
+    /// [`Self::login`] under the reauth lock, for the same reason as
+    /// [`Self::refresh_token_locked`].
+    pub async fn login_locked(&self) -> Result<TokenResponse> {
+        let _guard = self.inner.reauth_lock.lock().await;
+        self.login().await
     }
 
     pub async fn get_database_fields(
@@ -648,11 +676,7 @@ impl AppFlowyClient {
             if let Ok(Value::Object(map)) = serde_json::from_slice::<Value>(&body) {
                 let code = map.get("code").and_then(Value::as_i64);
                 if status >= 400 || code.is_some_and(|code| code != 0) {
-                    let message = map
-                        .get("message")
-                        .and_then(Value::as_str)
-                        .filter(|message| !message.is_empty())
-                        .map_or_else(|| format!("HTTP {status}"), str::to_string);
+                    let message = api_error_message(&map, status);
                     return Err(Error::api(message, Some(status), code));
                 }
             }
@@ -824,7 +848,18 @@ impl AppFlowyClient {
 
             let retryable =
                 status == StatusCode::TOO_MANY_REQUESTS || (status.is_server_error() && idempotent);
-            if retryable && attempt < self.inner.max_retries {
+            // A 429 usually means the request was rejected before being
+            // applied, so even a POST is safe to retry — but that guarantee
+            // only holds for standard rate-limit middleware. A 429 returned
+            // after the write landed (some gateways do this under load)
+            // would duplicate the side effect, so limit the non-idempotent
+            // retry to one attempt; GET/PUT/DELETE keep the full budget.
+            let budget = if idempotent {
+                self.inner.max_retries
+            } else {
+                1
+            };
+            if retryable && attempt < budget {
                 let delay = self.retry_delay(&response, attempt);
                 attempt += 1;
                 tokio::time::sleep(delay).await;
@@ -861,7 +896,10 @@ impl AppFlowyClient {
     }
 
     /// Delay before the next retry: the `Retry-After` header as fractional
-    /// seconds when parseable, falling back to `0.5 * 2^attempt`.
+    /// seconds when parseable, falling back to `0.5 * 2^attempt`. Clamped to
+    /// 60s — `f64::from_str` accepts `inf`/`1e30`, and `Duration::from_secs_f64`
+    /// panics on non-finite or out-of-u64 values, so an untrusted header must
+    /// never reach it raw.
     fn retry_delay(&self, response: &Response, attempt: u32) -> Duration {
         let secs = response
             .headers()
@@ -869,6 +907,7 @@ impl AppFlowyClient {
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.trim().parse::<f64>().ok())
             .filter(|secs| *secs >= 0.0)
+            .map(|secs| secs.min(MAX_RETRY_AFTER_SECS))
             .unwrap_or_else(|| self.inner.backoff_base * 2f64.powi(attempt as i32));
         Duration::from_secs_f64(secs)
     }
@@ -891,11 +930,7 @@ impl AppFlowyClient {
 
         if status >= 400 {
             if let Value::Object(map) = &body {
-                let message = map
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .filter(|message| !message.is_empty())
-                    .map_or_else(|| format!("HTTP {status}"), str::to_string);
+                let message = api_error_message(map, status);
                 let code = map.get("code").and_then(Value::as_i64);
                 return Err(Error::api(message, Some(status), code));
             }
@@ -933,6 +968,23 @@ impl AppFlowyClient {
     }
 }
 
+/// First human-readable message in an error body. AppFlowy uses `message`,
+/// but GoTrue (the `/gotrue/token` login/refresh endpoint) returns `msg` /
+/// `error_description` / `error` — without those keys a wrong password
+/// surfaces as a bare "HTTP 400" instead of "Invalid login credentials".
+fn api_error_message(map: &serde_json::Map<String, Value>, status: u16) -> String {
+    for key in ["message", "msg", "error_description", "error"] {
+        if let Some(message) = map
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|message| !message.is_empty())
+        {
+            return message.to_string();
+        }
+    }
+    format!("HTTP {status}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -950,5 +1002,68 @@ mod tests {
             .set_access_token(Some("already-refreshed".into()))
             .await;
         assert!(client.reauthenticate(Some("t".into())).await);
+    }
+
+    #[test]
+    fn api_error_message_prefers_gotrue_keys() {
+        // GoTrue (login/refresh) failure shape — the reason a wrong password
+        // surfaces at all instead of a bare "HTTP 400".
+        let gotrue = serde_json::json!({
+            "code": 400, "msg": "Bad credentials", "error_description": "Invalid login credentials"
+        });
+        let map = gotrue.as_object().unwrap();
+        assert_eq!(api_error_message(map, 400), "Bad credentials");
+
+        let alt = serde_json::json!({ "error_description": "Invalid login credentials" });
+        assert_eq!(
+            api_error_message(alt.as_object().unwrap(), 400),
+            "Invalid login credentials"
+        );
+
+        // AppFlowy envelope shape still wins via `message`.
+        let appflowy = serde_json::json!({ "code": 1026, "message": "workspace limit" });
+        assert_eq!(
+            api_error_message(appflowy.as_object().unwrap(), 400),
+            "workspace limit"
+        );
+
+        // Nothing recognizable: fall back to the status line.
+        let empty = serde_json::json!({ "code": 500 });
+        assert_eq!(
+            api_error_message(empty.as_object().unwrap(), 500),
+            "HTTP 500"
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_delay_clamps_huge_retry_after() {
+        // `inf` / 1e30 parse fine as f64 but panic in Duration::from_secs_f64;
+        // the clamp must bound them to MAX_RETRY_AFTER_SECS. Built through
+        // a real response from an httpmock server (the only Response source
+        // available without an `http` crate dependency).
+        use httpmock::prelude::*;
+        let server = MockServer::start_async().await;
+        let client = AppFlowyClient::new(None, None, server.base_url());
+        for header in ["inf", "infinity", "1e30", "99999999999999999999", "120"] {
+            let mock = server
+                .mock_async(|when, then| {
+                    when.method(GET).path("/x");
+                    then.status(429).header("Retry-After", header.to_string());
+                })
+                .await;
+            let response = client
+                .inner
+                .http
+                .get(format!("{}/x", server.base_url()))
+                .send()
+                .await
+                .expect("mock server responds");
+            let delay = client.retry_delay(&response, 0);
+            assert!(
+                delay <= Duration::from_secs(60),
+                "Retry-After: {header} yielded {delay:?}"
+            );
+            mock.delete_async().await;
+        }
     }
 }

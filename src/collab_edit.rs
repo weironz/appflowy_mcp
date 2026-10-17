@@ -321,9 +321,18 @@ pub(crate) fn parse_iso_timestamp(s: &str) -> Option<i64> {
     let (mut hour, mut minute, mut second, mut offset_secs) = (0i64, 0i64, 0i64, 0i64);
     if let Some(time_part) = time_part {
         let time_part = time_part.trim();
+        // "2026-10-01T" leaves the time part empty and `time_part[1..]` would
+        // panic there (slice out of bounds). Skip the offset search so the
+        // hms parse below rejects the input; a 1-char part is fine, as [1..]
+        // of it is just "".
+        let offset_idx = if time_part.is_empty() {
+            None
+        } else {
+            time_part[1..].find(['+', '-']).map(|idx| idx + 1)
+        };
         let (hms, offset) = if let Some(zone) = time_part.strip_suffix('Z') {
             (zone, 0i64)
-        } else if let Some(idx) = time_part[1..].find(['+', '-']).map(|idx| idx + 1) {
+        } else if let Some(idx) = offset_idx {
             let sign = if time_part.as_bytes()[idx] == b'-' {
                 -1
             } else {
@@ -489,6 +498,11 @@ fn encode_checklist(value: &Value, current: Option<&str>) -> std::result::Result
                     }
                     other => return Err(format!("checklist item must be a name or an object, got {other}")),
                 };
+                // A repeated name (["x", "x"]) would push the same option —
+                // and its selected id — twice; the first occurrence wins.
+                if kept.iter().any(|opt| name_of(opt) == name.as_str()) {
+                    continue;
+                }
                 let idx = ensure(&name, &mut options);
                 let opt = options[idx].clone();
                 if is_done {
@@ -541,10 +555,14 @@ pub(crate) fn encode_cell(
             }
         }
         FIELD_TYPE_SINGLE_SELECT => {
-            if scalar_to_string(value).unwrap_or_default().is_empty() {
+            // Null (or an empty string) clears the selection; anything else
+            // must name an option. A non-scalar object/array used to fall
+            // into the clear arm via `unwrap_or_default` and silently wipe
+            // the existing selection — reject it like multi-select does.
+            let name = scalar_to_string(value).map_err(field_err)?;
+            if name.is_empty() {
                 data_cell(Ok(String::new()))
             } else {
-                let name = scalar_to_string(value)?;
                 data_cell(field.option_id(&name))
             }
         }
@@ -807,16 +825,24 @@ pub(crate) fn set_collab_row_deleted(
     let mut txn = doc.transact_mut();
     let mut touched = 0usize;
     for orders in &row_order_arrays {
-        for index in 0..orders.len(&txn) {
-            let Some(Out::Any(any)) = orders.get(&txn, index) else {
-                continue;
-            };
-            let Ok(mut entry) = serde_json::to_value(&any) else {
-                continue;
-            };
-            if entry.get("id").and_then(Value::as_str) != Some(row_id) {
-                continue;
-            }
+        // Collect matching indexes in one linear scan: Array::get(index)
+        // re-walks the array from its head per call, making an index loop
+        // O(n^2) over a view's rows. The indexes stay valid below because
+        // each replace removes and reinserts at the same position, leaving
+        // every other element in place.
+        let matches: Vec<(u32, Value)> = orders
+            .iter(&txn)
+            .enumerate()
+            .filter_map(|(index, out)| {
+                let Out::Any(any) = out else {
+                    return None;
+                };
+                let entry = serde_json::to_value(&any).ok()?;
+                (entry.get("id").and_then(Value::as_str) == Some(row_id))
+                    .then_some((index as u32, entry))
+            })
+            .collect();
+        for (index, mut entry) in matches {
             let was_deleted = entry
                 .get("is_deleted")
                 .and_then(Value::as_bool)
@@ -1087,6 +1113,52 @@ mod tests {
     }
 
     #[test]
+    fn checklist_replace_dedupes_repeated_names() {
+        let tasks = field("C", "Tasks", FIELD_TYPE_CHECKLIST, json!({}));
+        // ["x", "x"] used to produce two options with two different ids and
+        // a duplicated selected id when done; the first occurrence wins.
+        let entries = encode_cell(&tasks, &json!(["x", "x"]), None).unwrap();
+        let out: Value = serde_json::from_str(entries["data"].as_str().unwrap()).unwrap();
+        let options = out["options"].as_array().unwrap();
+        assert_eq!(options.len(), 1);
+        assert_eq!(out["selected_option_ids"], json!([]));
+
+        // First occurrence wins the done state: the later done dup must not
+        // check the task, an earlier done dup must not duplicate the id.
+        let entries =
+            encode_cell(&tasks, &json!(["x", {"name": "x", "done": true}]), None).unwrap();
+        let out: Value = serde_json::from_str(entries["data"].as_str().unwrap()).unwrap();
+        assert_eq!(out["options"].as_array().unwrap().len(), 1);
+        assert_eq!(out["selected_option_ids"], json!([]));
+
+        let entries = encode_cell(
+            &tasks,
+            &json!([{"name": "x", "done": true}, {"name": "x", "done": true}]),
+            None,
+        )
+        .unwrap();
+        let out: Value = serde_json::from_str(entries["data"].as_str().unwrap()).unwrap();
+        let options = out["options"].as_array().unwrap();
+        assert_eq!(options.len(), 1);
+        assert_eq!(out["selected_option_ids"], json!([options[0]["id"]]));
+    }
+
+    #[test]
+    fn single_select_rejects_non_scalar_instead_of_clearing() {
+        // An object/array value used to silently clear the selection; it
+        // must error like the multi-select branch does.
+        let err = encode_cell(&status_field(), &json!({"id": "b"}), None).unwrap_err();
+        assert!(err.contains("expected a string/number/bool value"), "{err}");
+        let err = encode_cell(&status_field(), &json!(["Doing"]), None).unwrap_err();
+        assert!(err.contains("expected a string/number/bool value"), "{err}");
+        // Clearing with an explicit null keeps working.
+        assert_eq!(
+            encode_cell(&status_field(), &json!(null), None).unwrap()["data"],
+            json!("")
+        );
+    }
+
+    #[test]
     fn iso_timestamp_parse() {
         assert_eq!(parse_iso_timestamp("2026-10-01"), Some(1_790_812_800));
         assert_eq!(
@@ -1101,6 +1173,11 @@ mod tests {
         assert_eq!(parse_iso_timestamp("not a date"), None);
         assert_eq!(parse_iso_timestamp("2026/10/01"), None);
         assert_eq!(parse_iso_timestamp("2026-13-01"), None);
+        // An empty time part used to panic in the offset search
+        // (time_part[1..] of ""); it must fail the hms parse instead.
+        // The trailing-space variant trims to the same input.
+        assert_eq!(parse_iso_timestamp("2026-10-01T"), None);
+        assert_eq!(parse_iso_timestamp("2026-10-01T "), None);
     }
 
     #[test]

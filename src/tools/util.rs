@@ -1,6 +1,8 @@
 //! Helpers shared by the tool modules.
 
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+use std::time::Duration;
 
 use reqwest::Method;
 use rmcp::handler::server::tool::IntoCallToolResult;
@@ -65,6 +67,31 @@ pub fn map_tool_error(e: Error) -> ToolError {
         Error::Validation(message) => ToolError::Validation(message),
         other => ToolError::Protocol(ErrorData::internal_error(other.to_string(), None)),
     }
+}
+
+/// Shared HTTP client for PUTs to presigned storage URLs.
+///
+/// This is deliberately a *separate* client from [`AppFlowyClient`]'s: the
+/// presigned URL carries its authorization in the URL itself, so these
+/// requests must never send the workspace bearer token (the token must not
+/// leak to whatever backend hosts the object storage). It is process-wide
+/// because reqwest only pools connections per client — a fresh
+/// `Client::new()` per call/part threw that pool away. reqwest defaults to
+/// NO timeout at all, so a stalled storage connection would hang the tool
+/// forever; the total timeout is generous because large audio/zip uploads
+/// legitimately take minutes.
+pub fn presigned_upload_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(30))
+            .timeout(Duration::from_secs(600))
+            // A failed builder (e.g. no TLS backend) degrades to a default
+            // client rather than panicking inside OnceLock initialization —
+            // same fallback AppFlowyClient uses for its own client.
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    })
 }
 
 /// Guard against passing the workspace_id as a page parent.
@@ -215,6 +242,16 @@ mod tests {
     fn rejects_workspace_as_parent() {
         assert!(ensure_parent_is_not_workspace("ws", "ws").is_err());
         assert!(ensure_parent_is_not_workspace("ws", "space").is_ok());
+    }
+
+    #[test]
+    fn presigned_upload_client_is_a_shared_singleton() {
+        // One process-wide client keeps reqwest's connection pool across
+        // calls instead of building a new client per upload.
+        assert!(std::ptr::eq(
+            presigned_upload_client(),
+            presigned_upload_client()
+        ));
     }
 
     #[test]

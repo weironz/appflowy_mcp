@@ -14,6 +14,18 @@ use crate::tools::util::{ensure_parent_is_not_workspace, map_tool_error, ToolErr
 
 const SORT_BY_FIELDS: [&str; 3] = ["name", "created_at", "last_edited_time"];
 
+/// Python `Field(..., min_length=1)` on strings, checked after trimming —
+/// identical semantics to content.rs's helper of the same name, so id
+/// validation behaves the same across the page modules. Guards against
+/// empty ids reaching the API as URLs like /api/workspace//page-view/,
+/// which fail with confusing server errors.
+fn require_non_empty(value: &str, field: &str) -> Result<(), ToolError> {
+    if value.trim().is_empty() {
+        return Err(ToolError::validation(format!("{field} must not be empty")));
+    }
+    Ok(())
+}
+
 /// Mirrors Python `models.py::CreatePageRequest` (plus the path-level
 /// `workspace_id` the FastMCP signature adds).
 #[derive(Debug, Default, Deserialize, rmcp::schemars::JsonSchema)]
@@ -205,6 +217,82 @@ impl PartialOrd for SortKey {
 
 impl Eq for SortKey {}
 
+/// Target indices whose pages need a real move request, in call order.
+///
+/// Python's loop tested `current[index] == page_id` and then did
+/// `current.remove(page_id); current.insert(index, page_id)` — O(n^2) list
+/// surgery. The linked list below keeps only the not-yet-placed suffix and
+/// models the same evolving order: the page at absolute position `index` is
+/// exactly the head of that suffix, because every position before it
+/// already holds target's placed prefix.
+///
+/// Per iteration:
+/// - head == page: already at `index`; unlink it — it joins the placed
+///   prefix and the next suffix page becomes the head at `index+1`.
+/// - otherwise: a move is needed. The POST itself places the page at
+///   `index`, so after unlinking it the OLD head is the page at `index+1` —
+///   no re-insertion. (Re-inserting the moved page as the new head would
+///   point `head` at an already-placed page, so every later page would also
+///   look displaced and get a redundant move: an adjacent swap cost 3
+///   writes instead of 1.)
+///
+/// Each page is unlinked at most once, so the simulation stays O(n).
+fn reorder_move_positions(current: &[String], target: &[String]) -> Vec<usize> {
+    let in_children: HashMap<&str, usize> = current
+        .iter()
+        .enumerate()
+        .map(|(i, id)| (id.as_str(), i))
+        .collect();
+    // Slots index into `current` (target reorders the same ids), so size
+    // the list state by `current`, not `target`.
+    let n = current.len();
+    let mut prev_slot: Vec<Option<usize>> = (0..n).map(|i| i.checked_sub(1)).collect();
+    let mut next_slot: Vec<Option<usize>> = (0..n).map(|i| (i + 1 < n).then_some(i + 1)).collect();
+    let mut in_list: Vec<bool> = vec![true; n];
+    let mut head: Option<usize> = (!current.is_empty()).then_some(0);
+    let unlink = |slot: usize,
+                  head: &mut Option<usize>,
+                  prev_slot: &mut [Option<usize>],
+                  next_slot: &mut [Option<usize>],
+                  in_list: &mut [bool]| {
+        if !in_list[slot] {
+            return;
+        }
+        in_list[slot] = false;
+        let (prev, next) = (prev_slot[slot], next_slot[slot]);
+        if let Some(prev) = prev {
+            next_slot[prev] = next;
+        } else {
+            *head = next;
+        }
+        if let Some(next) = next {
+            prev_slot[next] = prev;
+        }
+        prev_slot[slot] = None;
+        next_slot[slot] = None;
+    };
+    let mut moves = Vec::new();
+    for (index, page_id) in target.iter().enumerate() {
+        let Some(&slot) = in_children.get(page_id.as_str()) else {
+            // Defensive: `target` only ever holds known children.
+            continue;
+        };
+        let already_in_place = in_list[slot] && head == Some(slot);
+        // Both branches unlink; only a displaced page needs a real move.
+        unlink(
+            slot,
+            &mut head,
+            &mut prev_slot,
+            &mut next_slot,
+            &mut in_list,
+        );
+        if !already_in_place {
+            moves.push(index);
+        }
+    }
+    moves
+}
+
 #[tool_router(router = pages_tool_router, vis = "pub(crate)")]
 impl AppServer {
     /// Return `json!` shape shared by the thin proxy tools.
@@ -216,6 +304,8 @@ impl AppServer {
         &self,
         Parameters(p): Parameters<CreatePageParams>,
     ) -> Result<Json<Value>, ToolError> {
+        require_non_empty(&p.workspace_id, "workspace_id")?;
+        require_non_empty(&p.parent_view_id, "parent_view_id")?;
         ensure_parent_is_not_workspace(&p.workspace_id, &p.parent_view_id)
             .map_err(map_tool_error)?;
         if let Some(layout) = p.layout {
@@ -252,6 +342,8 @@ impl AppServer {
         &self,
         Parameters(p): Parameters<GetPageParams>,
     ) -> Result<Json<Value>, ToolError> {
+        require_non_empty(&p.workspace_id, "workspace_id")?;
+        require_non_empty(&p.page_id, "page_id")?;
         self.client
             .request(
                 Method::GET,
@@ -272,7 +364,9 @@ impl AppServer {
         &self,
         Parameters(p): Parameters<GetCollabParams>,
     ) -> Result<Json<Value>, ToolError> {
-        let (markdown, _attempts) = fetch_collab_markdown(
+        require_non_empty(&p.workspace_id, "workspace_id")?;
+        require_non_empty(&p.page_id, "page_id")?;
+        let (markdown, attempts) = fetch_collab_markdown(
             &self.client,
             &p.workspace_id,
             &p.page_id,
@@ -283,9 +377,13 @@ impl AppServer {
             Some(markdown) => Ok(Json(
                 json!({ "object_id": p.page_id, "markdown": markdown }),
             )),
-            None => Err(ToolError::internal(
-                "Could not fetch collab content for this object (no document collab).",
-            )),
+            // The attempts trail carries the real per-try causes (network,
+            // auth, decode); a bare "no document collab" hides them.
+            None => Err(ToolError::internal(format!(
+                "Could not fetch collab content for this object (no document collab). \
+                 Attempts: {}",
+                attempts.join(" | ")
+            ))),
         }
     }
 
@@ -297,6 +395,8 @@ impl AppServer {
         &self,
         Parameters(p): Parameters<UpdatePageParams>,
     ) -> Result<Json<Value>, ToolError> {
+        require_non_empty(&p.workspace_id, "workspace_id")?;
+        require_non_empty(&p.page_id, "page_id")?;
         self.client
             .request(
                 Method::PATCH,
@@ -322,6 +422,9 @@ impl AppServer {
         &self,
         Parameters(p): Parameters<MovePageParams>,
     ) -> Result<Json<Value>, ToolError> {
+        require_non_empty(&p.workspace_id, "workspace_id")?;
+        require_non_empty(&p.page_id, "page_id")?;
+        require_non_empty(&p.new_parent_view_id, "new_parent_view_id")?;
         ensure_parent_is_not_workspace(&p.workspace_id, &p.new_parent_view_id)
             .map_err(map_tool_error)?;
         self.client
@@ -350,6 +453,8 @@ impl AppServer {
         &self,
         Parameters(p): Parameters<ReorderPagesParams>,
     ) -> Result<Json<Value>, ToolError> {
+        require_non_empty(&p.workspace_id, "workspace_id")?;
+        require_non_empty(&p.parent_view_id, "parent_view_id")?;
         ensure_parent_is_not_workspace(&p.workspace_id, &p.parent_view_id)
             .map_err(map_tool_error)?;
         if p.page_ids.is_none() == p.sort_by.is_none() {
@@ -461,59 +566,11 @@ impl AppServer {
             }
         };
 
-        // Simulate Python's `current.remove/insert` skip checks with a linked
-        // list of the not-yet-placed suffix: a page sits at absolute position
-        // `index` iff it is the head of that suffix. Each page is unlinked
-        // exactly once, so the whole simulation is O(n) instead of O(n^2).
-        // (Moves above already dominate the wall time; this keeps big spaces
-        // from degrading further.)
-        // Slots index into `current` (target reorders the same ids), so size
-        // the list state by `current`, not `target`.
-        let n = current.len();
-        let mut prev_slot: Vec<Option<usize>> = (0..n).map(|i| i.checked_sub(1)).collect();
-        let mut next_slot: Vec<Option<usize>> =
-            (0..n).map(|i| (i + 1 < n).then_some(i + 1)).collect();
-        let mut in_list: Vec<bool> = vec![true; n];
-        let mut head: Option<usize> = (!current.is_empty()).then_some(0);
-        let mut moves = 0u64;
-
-        for (index, page_id) in target.iter().enumerate() {
-            let Some(&slot) = in_children.get(page_id.as_str()) else {
-                // Defensive: `target` only ever holds known children.
-                continue;
-            };
-            let already_in_place = in_list[slot] && head == Some(slot);
-            let unlink = |slot: usize,
-                          head: &mut Option<usize>,
-                          prev_slot: &mut [Option<usize>],
-                          next_slot: &mut [Option<usize>],
-                          in_list: &mut [bool]| {
-                if !in_list[slot] {
-                    return;
-                }
-                in_list[slot] = false;
-                let (prev, next) = (prev_slot[slot], next_slot[slot]);
-                if let Some(prev) = prev {
-                    next_slot[prev] = next;
-                } else {
-                    *head = next;
-                }
-                if let Some(next) = next {
-                    prev_slot[next] = prev;
-                }
-                prev_slot[slot] = None;
-                next_slot[slot] = None;
-            };
-            if already_in_place {
-                unlink(
-                    slot,
-                    &mut head,
-                    &mut prev_slot,
-                    &mut next_slot,
-                    &mut in_list,
-                );
-                continue;
-            }
+        // Which target positions need a real move is a pure function of the
+        // current and target orders; compute it up front (see
+        // `reorder_move_positions` for the linked-list invariant).
+        let move_positions = reorder_move_positions(&current, &target);
+        for &index in &move_positions {
             // Sequential on purpose: each move re-reads the order produced
             // by the previous one (AppFlowy has no bulk-sort endpoint).
             self.client
@@ -521,7 +578,7 @@ impl AppServer {
                     Method::POST,
                     &format!(
                         "/api/workspace/{}/page-view/{}/move",
-                        p.workspace_id, page_id
+                        p.workspace_id, target[index]
                     ),
                     None,
                     Some(json!({
@@ -531,22 +588,6 @@ impl AppServer {
                 )
                 .await
                 .map_err(map_tool_error)?;
-            unlink(
-                slot,
-                &mut head,
-                &mut prev_slot,
-                &mut next_slot,
-                &mut in_list,
-            );
-            // Re-insert as the new head of the unplaced suffix (== absolute
-            // position `index`, since the placed prefix is fixed).
-            in_list[slot] = true;
-            next_slot[slot] = head;
-            if let Some(old_head) = head {
-                prev_slot[old_head] = Some(slot);
-            }
-            head = Some(slot);
-            moves += 1;
         }
 
         Ok(Json(json!({
@@ -555,7 +596,7 @@ impl AppServer {
                 "view_id": pid,
                 "name": names.get(pid.as_str()).cloned().unwrap_or(Value::Null),
             })).collect::<Vec<_>>(),
-            "moves_performed": moves,
+            "moves_performed": move_positions.len(),
         })))
     }
 
@@ -567,6 +608,8 @@ impl AppServer {
         &self,
         Parameters(p): Parameters<PageRefParams>,
     ) -> Result<Json<Value>, ToolError> {
+        require_non_empty(&p.workspace_id, "workspace_id")?;
+        require_non_empty(&p.page_id, "page_id")?;
         self.client
             .request(
                 Method::POST,
@@ -590,6 +633,8 @@ impl AppServer {
         &self,
         Parameters(p): Parameters<PageRefParams>,
     ) -> Result<Json<Value>, ToolError> {
+        require_non_empty(&p.workspace_id, "workspace_id")?;
+        require_non_empty(&p.page_id, "page_id")?;
         self.client
             .request(
                 Method::POST,
@@ -613,6 +658,8 @@ impl AppServer {
         &self,
         Parameters(p): Parameters<PageRefParams>,
     ) -> Result<Json<Value>, ToolError> {
+        require_non_empty(&p.workspace_id, "workspace_id")?;
+        require_non_empty(&p.page_id, "page_id")?;
         self.client
             .request(
                 Method::DELETE,
@@ -633,6 +680,8 @@ impl AppServer {
         &self,
         Parameters(p): Parameters<FavoritePageParams>,
     ) -> Result<Json<Value>, ToolError> {
+        require_non_empty(&p.workspace_id, "workspace_id")?;
+        require_non_empty(&p.page_id, "page_id")?;
         self.client
             .request(
                 Method::POST,
@@ -659,6 +708,8 @@ impl AppServer {
         &self,
         Parameters(p): Parameters<ReorderFavoriteParams>,
     ) -> Result<Json<Value>, ToolError> {
+        require_non_empty(&p.workspace_id, "workspace_id")?;
+        require_non_empty(&p.page_id, "page_id")?;
         self.client
             .request(
                 Method::POST,
@@ -684,6 +735,7 @@ impl AppServer {
         &self,
         Parameters(p): Parameters<WorkspaceUnitsParams>,
     ) -> Result<Json<Value>, ToolError> {
+        require_non_empty(&p.workspace_id, "workspace_id")?;
         self.client
             .request(
                 Method::GET,
@@ -704,6 +756,7 @@ impl AppServer {
         &self,
         Parameters(p): Parameters<WorkspaceUnitsParams>,
     ) -> Result<Json<Value>, ToolError> {
+        require_non_empty(&p.workspace_id, "workspace_id")?;
         self.client
             .request(
                 Method::GET,
@@ -724,6 +777,8 @@ impl AppServer {
         &self,
         Parameters(p): Parameters<DuplicatePageParams>,
     ) -> Result<Json<Value>, ToolError> {
+        require_non_empty(&p.workspace_id, "workspace_id")?;
+        require_non_empty(&p.page_id, "page_id")?;
         // DuplicatePageRequest only carries an optional name `suffix` — the
         // endpoint duplicates in place under the same parent, so there is no
         // caller-supplied parent to guard with ensure_parent_is_not_workspace.
@@ -750,6 +805,7 @@ impl AppServer {
         &self,
         Parameters(p): Parameters<WorkspaceUnitsParams>,
     ) -> Result<Json<Value>, ToolError> {
+        require_non_empty(&p.workspace_id, "workspace_id")?;
         self.client
             .request(
                 Method::GET,
@@ -770,6 +826,7 @@ impl AppServer {
         &self,
         Parameters(p): Parameters<WorkspaceUnitsParams>,
     ) -> Result<Json<Value>, ToolError> {
+        require_non_empty(&p.workspace_id, "workspace_id")?;
         self.client
             .request(
                 Method::POST,
@@ -793,6 +850,7 @@ impl AppServer {
         &self,
         Parameters(p): Parameters<WorkspaceUnitsParams>,
     ) -> Result<Json<Value>, ToolError> {
+        require_non_empty(&p.workspace_id, "workspace_id")?;
         self.client
             .request(
                 Method::POST,
@@ -825,5 +883,66 @@ mod tests {
             SortKey::from(Some(&json!(10)), "created_at")
                 < SortKey::from(Some(&json!(20)), "created_at")
         );
+    }
+
+    fn ids(values: &[&str]) -> Vec<String> {
+        values.iter().map(|v| v.to_string()).collect()
+    }
+
+    #[test]
+    fn reorder_already_sorted_needs_no_moves() {
+        let current = ids(&["a", "b", "c"]);
+        assert_eq!(
+            reorder_move_positions(&current, &current),
+            Vec::<usize>::new()
+        );
+    }
+
+    #[test]
+    fn reorder_adjacent_swap_needs_one_move() {
+        // Regression: the old re-insert-as-head simulation issued 3 moves
+        // here; Python's list semantics (and reality) need exactly 1 —
+        // moving b to the front puts [a, c] after it in the right order.
+        let current = ids(&["a", "b", "c"]);
+        let target = ids(&["b", "a", "c"]);
+        assert_eq!(reorder_move_positions(&current, &target), vec![0]);
+    }
+
+    #[test]
+    fn reorder_full_reverse_needs_all_but_last_moves() {
+        // Python's algorithm: each of the first n-1 pages moves to the
+        // front; the last one is then already in place.
+        let current = ids(&["a", "b", "c", "d"]);
+        let target = ids(&["d", "c", "b", "a"]);
+        assert_eq!(reorder_move_positions(&current, &target), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn reorder_rotation_moves_each_displaced_page() {
+        // Rotating the first page to the end displaces every position, so
+        // Python's algorithm moves b, c, d forward one by one (a's single
+        // move to the end would also suffice, but that is not what the
+        // reference algorithm computes — keep parity with it).
+        let current = ids(&["a", "b", "c", "d"]);
+        let target = ids(&["b", "c", "d", "a"]);
+        assert_eq!(reorder_move_positions(&current, &target), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn reorder_moves_only_displaced_positions() {
+        // Only the head of the suffix matters: a, b are consumed in place,
+        // then the d/e swap costs one move.
+        let current = ids(&["a", "b", "c", "d", "e"]);
+        let target = ids(&["c", "a", "b", "e", "d"]);
+        assert_eq!(reorder_move_positions(&current, &target), vec![0, 3]);
+    }
+
+    #[test]
+    fn require_non_empty_rejects_blank_ids() {
+        // Empty / whitespace-only ids would otherwise hit the API as
+        // /api/workspace//page-view// and produce confusing server errors.
+        assert!(require_non_empty("", "workspace_id").is_err());
+        assert!(require_non_empty("   \t ", "page_id").is_err());
+        assert!(require_non_empty("ws-1", "workspace_id").is_ok());
     }
 }

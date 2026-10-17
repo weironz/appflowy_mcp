@@ -61,6 +61,12 @@ pub const EXPORT_MAX_WORKERS: usize = 8;
 pub const DEFAULT_PAGE_RETRIES: u32 = 2;
 pub const DEFAULT_PAGE_BACKOFF_SECS: f64 = 0.4;
 
+/// Depth of the `/folder` tree fetch for space/workspace exports. The API
+/// truncates deeper subtrees, and those pages silently disappear from the
+/// export; the constant is surfaced in the tool's warnings so the limit is
+/// at least visible.
+pub const EXPORT_TREE_DEPTH: &str = "10";
+
 /// Per-page outcome of a prefetch: rendered Markdown or the error message.
 /// Python: `dict[str, str | Exception]`.
 pub type PrefetchCache = HashMap<String, std::result::Result<String, String>>;
@@ -453,6 +459,11 @@ pub async fn fetch_page_markdown(
     backoff_secs: f64,
 ) -> Result<String> {
     let mut traces: Vec<String> = Vec::new();
+    // The empty markdown from the LAST successful attempt; an empty result is
+    // only trustworthy when nothing errored after it — otherwise a transient
+    // empty render followed by real failures would pin an empty file (and the
+    // unchanged last_edited_time in the manifest would make the emptiness
+    // permanent for incremental re-exports).
     let mut page_markdown: Option<String> = None;
     let mut page_error: Option<Error> = None;
     for attempt in 0..=retries {
@@ -469,6 +480,9 @@ pub async fn fetch_page_markdown(
                 page_markdown = Some(markdown);
             }
             Err(e) => {
+                // An error after an earlier empty render invalidates it: keep
+                // the error, drop the stale empty result.
+                page_markdown = None;
                 traces.push(format!(
                     "page-view GET /api/workspace/{workspace_id}/page-view/{view_id} (attempt {}): {e}",
                     attempt + 1
@@ -492,7 +506,7 @@ pub async fn fetch_page_markdown(
         }
     }
     if let Some(md) = page_markdown {
-        return Ok(md); // genuinely empty page
+        return Ok(md); // the LAST attempt rendered an empty document
     }
     if let Some(md) = fallback {
         return Ok(md);
@@ -702,6 +716,12 @@ fn plan_views<'a>(
                 .unwrap_or_else(|| "0".to_string());
             warnings.push(format!(
                 "skipped non-document view '{name}' (layout {layout_display})"
+            ));
+            // Keep descending: document pages nested under a grid/board
+            // must not disappear with their parent (the legacy walk
+            // flattened through non-document nodes too).
+            plans.extend(plan_views(
+                children, directory, base, manifest, occupancy, warnings,
             ));
             continue;
         }
@@ -1145,6 +1165,16 @@ impl AppServer {
                 .filter(|s| !s.is_empty())
                 .unwrap_or(&page_id)
                 .to_string();
+
+            // A path that is empty after tilde expansion would resolve
+            // `.file_name()` to None and silently write a hidden `.md` into
+            // the process CWD (the PDF export already rejects this).
+            let expanded = expand_tilde(&request.path);
+            if expanded.as_os_str().is_empty() {
+                return Err(Error::Validation(
+                    "path is required: pass a file path ending in .md (or no extension).".into(),
+                ));
+            }
             let markdown = fetch_page_markdown(
                 &self.client,
                 &workspace_id,
@@ -1155,7 +1185,7 @@ impl AppServer {
             )
             .await?;
 
-            let mut path = expand_tilde(&request.path);
+            let mut path = expanded;
             let is_markdown = path
                 .extension()
                 .map(|e| {
@@ -1200,7 +1230,7 @@ impl AppServer {
             .map_err(map_tool_error)?;
         let run = async {
             let params_qs = [
-                ("depth", "10".to_string()),
+                ("depth", EXPORT_TREE_DEPTH.to_string()),
                 ("root_view_id", params.space_view_id.clone()),
             ];
             let root = self
@@ -1214,6 +1244,12 @@ impl AppServer {
                 .await?;
             let mut exported = Vec::new();
             let mut warnings = Vec::new();
+            // See the workspace export: deeper-nested pages are absent from
+            // the fetched tree, so say so.
+            warnings.push(format!(
+                "note: the folder tree is fetched with depth {} — pages nested deeper than that are not exported",
+                EXPORT_TREE_DEPTH
+            ));
             let mut skipped_unchanged = 0usize;
             export_views_to_directory_stats(
                 &self.client,
@@ -1247,7 +1283,7 @@ impl AppServer {
         let directory = prepare_destination_directory(&params.request.path, &params.workspace_id)
             .map_err(map_tool_error)?;
         let run = async {
-            let params_qs = [("depth", "10".to_string())];
+            let params_qs = [("depth", EXPORT_TREE_DEPTH.to_string())];
             let root = self
                 .client
                 .request(
@@ -1264,6 +1300,13 @@ impl AppServer {
                 .unwrap_or(&[]);
             let mut exported = Vec::new();
             let mut warnings = Vec::new();
+            // Pages nested deeper than the folder fetch's depth simply do
+            // not appear in the tree; surface that instead of silently
+            // missing files.
+            warnings.push(format!(
+                "note: the folder tree is fetched with depth {} — pages nested deeper than that are not exported",
+                EXPORT_TREE_DEPTH
+            ));
             let mut skipped_unchanged = 0usize;
             export_views_to_directory_stats(
                 &self.client,
@@ -1402,7 +1445,14 @@ impl AppServer {
             )
             .await
             .map_err(map_tool_error)?;
-        let task_id = data.get("task_id").cloned().unwrap_or(data);
+        let task_id = data.get("task_id").cloned().ok_or_else(|| {
+            // An envelope without task_id is not a task handle; returning the
+            // whole response as the "id" would mislead callers into polling
+            // with an object.
+            ToolError::internal(
+                "workspace zip export response did not include task_id; full response: {data}",
+            )
+        })?;
         Ok(Json(json!({
             "task_id": task_id,
             "note": "The server builds the archive asynchronously and emails the workspace owner a download link when it is ready. Owner-only endpoint.",
