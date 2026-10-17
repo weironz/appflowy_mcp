@@ -155,6 +155,9 @@ appflowy import demo note.md            # local file -> one page
 echo "# Note" | appflowy save demo "Title"
 
 appflowy -w Programming ls              # one-off workspace override
+
+appflowy update --check                 # is a newer release available?
+appflowy update                          # self-update in place (no login needed)
 ```
 
 Every command accepts `--json` for machine-readable output. A nightly workspace backup is one cron line:
