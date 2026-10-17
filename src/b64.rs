@@ -45,7 +45,10 @@ mod tests {
     #[test]
     fn decodes_standard_and_lenient_inputs() {
         assert_eq!(base64_decode("SGVsbG8="), Some(b"Hello".to_vec()));
-        assert_eq!(base64_decode("aGVsbG8=").as_deref(), Some(b"hello".as_slice()));
+        assert_eq!(
+            base64_decode("aGVsbG8=").as_deref(),
+            Some(b"hello".as_slice())
+        );
         assert_eq!(base64_decode("aGk=").as_deref(), Some(b"hi".as_slice()));
         assert_eq!(base64_decode("PQ=="), Some(vec![b'=']));
         assert_eq!(base64_decode(""), Some(Vec::new()));
@@ -53,8 +56,8 @@ mod tests {
         assert_eq!(base64_decode("SGVs bG8=\n"), Some(b"Hello".to_vec()));
         assert_eq!(base64_decode("aG VsbG8!@#="), Some(b"hello".to_vec()));
         assert_eq!(base64_decode("QQ==="), Some(b"A".to_vec())); // excess padding ignored
-        // Python raises Invalid padding for both of these (bad length without
-        // padding, and a lone data char): decode fails.
+                                                                 // Python raises Invalid padding for both of these (bad length without
+                                                                 // padding, and a lone data char): decode fails.
         assert_eq!(base64_decode("SGVsbG8"), None); // missing padding
         assert_eq!(base64_decode("aGVsbG8"), None);
         assert_eq!(base64_decode("a"), None);

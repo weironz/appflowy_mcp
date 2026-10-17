@@ -24,9 +24,9 @@ use std::sync::Arc;
 use percent_encoding::percent_decode_str;
 use reqwest::Method;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::{ErrorData, Json, tool, tool_router};
+use rmcp::{tool, tool_router, ErrorData, Json};
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
@@ -235,8 +235,9 @@ async fn fetch_page_view_markdown(
     // Python feeds the payload to decode_document directly, which requires a
     // list of ints; routing it through `encoded_collab_bytes` additionally
     // tolerates a base64 string (Python would have errored and retried).
-    let bytes = encoded_collab_bytes(encoded)
-        .ok_or_else(|| Error::Other("Page response encoded_collab is not a byte payload.".into()))?;
+    let bytes = encoded_collab_bytes(encoded).ok_or_else(|| {
+        Error::Other("Page response encoded_collab is not a byte payload.".into())
+    })?;
     let document = decode_document(&bytes)?;
     Ok(document_to_markdown(&document, title))
 }
@@ -260,7 +261,10 @@ pub async fn fetch_collab_markdown(
     let mut attempts = Vec::new();
     for collab_type in ["0", "Document"] {
         let params = [("collab_type", collab_type.to_string())];
-        let data = match client.request(Method::GET, &path, Some(&params), None).await {
+        let data = match client
+            .request(Method::GET, &path, Some(&params), None)
+            .await
+        {
             Ok(data) => data,
             Err(e) => {
                 attempts.push(format!(
@@ -369,7 +373,10 @@ pub async fn fetch_page_markdown(
 /// document views (non-space, document layout).
 pub fn collect_document_views(views: &[Value]) -> Vec<&Value> {
     fn is_document(view: &Value) -> bool {
-        !view.get("is_space").and_then(Value::as_bool).unwrap_or(false)
+        !view
+            .get("is_space")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
             && view.get("layout").and_then(Value::as_i64).unwrap_or(0) == 0
             && view
                 .get("view_id")
@@ -510,7 +517,11 @@ fn export_views_recursive<'a>(
             }
 
             let mut markdown: Option<String> = None;
-            if !view.get("is_space").and_then(Value::as_bool).unwrap_or(false) {
+            if !view
+                .get("is_space")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
                 match view.get("view_id").and_then(Value::as_str) {
                     Some(view_id) => match cache.get(view_id) {
                         Some(Err(e)) => {
@@ -658,8 +669,12 @@ fn prepare_destination_directory(raw: &str) -> Result<PathBuf> {
             )));
         }
     }
-    std::fs::create_dir_all(&directory)
-        .map_err(|e| Error::Other(format!("Failed to create directory {}: {e}", directory.display())))?;
+    std::fs::create_dir_all(&directory).map_err(|e| {
+        Error::Other(format!(
+            "Failed to create directory {}: {e}",
+            directory.display()
+        ))
+    })?;
     Ok(directory)
 }
 
@@ -789,8 +804,8 @@ impl AppServer {
     ) -> std::result::Result<Json<Value>, ErrorData> {
         // Destination validation is a parameter error and must fire before
         // any network request (Python rewrapped it as a generic error).
-        let directory = prepare_destination_directory(&params.request.path)
-            .map_err(map_tool_error)?;
+        let directory =
+            prepare_destination_directory(&params.request.path).map_err(map_tool_error)?;
         let run = async {
             let params_qs = [
                 ("depth", "10".to_string()),
@@ -834,8 +849,8 @@ impl AppServer {
         &self,
         Parameters(params): Parameters<ExportWorkspaceParams>,
     ) -> std::result::Result<Json<Value>, ErrorData> {
-        let directory = prepare_destination_directory(&params.request.path)
-            .map_err(map_tool_error)?;
+        let directory =
+            prepare_destination_directory(&params.request.path).map_err(map_tool_error)?;
         let run = async {
             let params_qs = [("depth", "10".to_string())];
             let root = self
@@ -1077,7 +1092,9 @@ mod tests {
         std::fs::create_dir_all(&base).unwrap();
         std::fs::write(base.join("existing.txt"), "x").unwrap();
         let err = prepare_destination_directory(base.to_str().unwrap()).unwrap_err();
-        assert!(matches!(err, Error::Validation(ref m) if m.contains("Destination directory is not empty")));
+        assert!(
+            matches!(err, Error::Validation(ref m) if m.contains("Destination directory is not empty"))
+        );
         std::fs::remove_dir_all(&base).unwrap();
     }
 
@@ -1153,7 +1170,7 @@ mod tests {
 
     #[test]
     fn content_disposition_filename_prefers_rfc6266_extended_form() {
-        use reqwest::header::{CONTENT_DISPOSITION, HeaderMap, HeaderValue};
+        use reqwest::header::{HeaderMap, HeaderValue, CONTENT_DISPOSITION};
 
         let mut headers = HeaderMap::new();
         headers.insert(

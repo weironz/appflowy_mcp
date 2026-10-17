@@ -2,9 +2,9 @@
 
 use reqwest::Method;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::{ErrorData, Json, tool, tool_router};
+use rmcp::{tool, tool_router, ErrorData, Json};
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use crate::server::AppServer;
 use crate::tools::util::map_tool_error;
@@ -55,7 +55,10 @@ impl AppServer {
         let params: Vec<(&str, String)> = vec![
             ("query", request.query.clone()),
             ("limit", request.limit.unwrap_or(10).to_string()),
-            ("preview_size", request.preview_size.unwrap_or(180).to_string()),
+            (
+                "preview_size",
+                request.preview_size.unwrap_or(180).to_string(),
+            ),
         ];
         let data = self
             .client

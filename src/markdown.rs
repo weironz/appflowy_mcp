@@ -62,9 +62,7 @@ fn link_detail_pattern() -> &'static Regex {
 
 fn table_separator_cell_pattern() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(r"^:?-+:?$").expect("TABLE_SEPARATOR_CELL_PATTERN must compile")
-    })
+    RE.get_or_init(|| Regex::new(r"^:?-+:?$").expect("TABLE_SEPARATOR_CELL_PATTERN must compile"))
 }
 
 fn math_block_pattern() -> &'static Regex {
@@ -573,7 +571,10 @@ pub fn parse_markdown_to_blocks(
 /// Split a fallback paragraph line around inline image syntax, emitting an
 /// image block (with resolved URL) per `![alt](url)` and paragraph blocks for
 /// the surrounding text. Mirrors `_blocks_from_inline_images`.
-fn blocks_from_inline_images(line: &str, resolver: Option<&mut ImageUrlResolver<'_>>) -> Vec<Block> {
+fn blocks_from_inline_images(
+    line: &str,
+    resolver: Option<&mut ImageUrlResolver<'_>>,
+) -> Vec<Block> {
     let mut resolver = resolver;
     let mut blocks: Vec<Block> = Vec::new();
     let mut last_end = 0usize;

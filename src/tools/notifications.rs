@@ -2,9 +2,9 @@
 
 use reqwest::Method;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::{ErrorData, Json, tool, tool_router};
+use rmcp::{tool, tool_router, ErrorData, Json};
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use crate::server::AppServer;
 use crate::tools::util::map_tool_error;
@@ -70,7 +70,11 @@ impl AppServer {
         if let Some(limit) = request.limit {
             params.push(("limit", limit.to_string()));
         }
-        let params = if params.is_empty() { None } else { Some(&params[..]) };
+        let params = if params.is_empty() {
+            None
+        } else {
+            Some(&params[..])
+        };
         let data = self
             .client
             .request(

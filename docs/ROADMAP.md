@@ -101,6 +101,11 @@ minutes to seconds. *Rust: thread pool replaced by `tokio` JoinSet + Semaphore
 - [x] **Multi-platform binaries** (0.8.0): the release workflow builds
   Windows/Linux/macOS (x64 + arm64) binaries and attaches them to GitHub
   Releases; PyPI publishing removed.
+- [x] **CLI self-update**: `appflowy update [--version X.Y.Z] [--check]`
+  downloads the matching release asset, smoke-tests it with `--version`, and
+  swaps it in at the running executable's path (rename-aside on Windows),
+  re-syncing the `appflowy-mcp` sibling name. Same flow as the install
+  scripts, no re-run needed.
 - [ ] **P4 — Import AppFlowy native `.zip`** — deferred (see research below).
 - [ ] Incremental / skip-unchanged export (by `last_edited_time`).
 - [ ] CLI `login`: mask password input (needs `rpassword`; the Rust port
@@ -172,6 +177,40 @@ older self-hosted images lack them.
   get-transcript / get-paragraphs / delete / usage.
 - [x] **Row comment notification**:
   `/api/workspace/{ws}/database/{db}/row/{rowId}/comment/notification`.
+
+### Community intake — shipped (unreleased; tools count 114 -> 119)
+
+Community PRs/issues written against the Python tree (before the Rust
+rewrite) were ported and — unlike the original PRs — every claim was
+independently re-verified against the live cloud by us.
+
+- [x] **append-block ordering fix** (from PR #4). The
+  `page-view/{id}/append-block` endpoint prepends at every level: batched
+  top-level blocks land out of order and nested children (table rows AND
+  row cells) flip. Verbatim repro confirmed on our Rust tools, then fixed
+  by sending one top-level block per call with **recursively** pre-reversed
+  children (PR's own scheme; note: shallow pre-reversal leaves cells
+  flipped — full recursion is required). Applies to all 4 append tools and
+  `appflowy_append_markdown_to_row`.
+- [x] **Database-row documents** (issue #1, PR #2). A row's page body is a
+  separate Document collab addressed by `UUIDv5(namespace=row UUID,
+  name="document_id")` (byte-identical to PR's published test vector).
+  `appflowy_create_row`/`appflowy_upsert_row` initialize it atomically when
+  `document` is passed and now return `{id, document_initialized,
+  document_id?}`; `appflowy_append_markdown_to_row` guards `has_doc` and
+  appends to the derived collab. Also fixed while integrating: create/upsert
+  returned the id double-JSON-encoded.
+- [x] **`appflowy_append_page_link`** (PR #3): native `linked_page` block.
+- [x] **Row update / delete / restore** (PR #4), via
+  `collab/{id}/web-update` + a `yrs` state-vector diff (`src/collab_edit.rs`):
+  cells keyed by field name across all field types incl. checklist ops;
+  delete/restore flag `is_deleted` in every view's `row_orders` exactly like
+  the web UI. 49 unit tests + full live A/B (create → append → update →
+  delete → restore → read-back).
+- [x] **P8 updated**: the web-update path is now PROVEN for database-row
+  collabs with bounded, server-shaped mutations (PR #4 + our port).
+  Free-form page content editing remains deferred — wider mutations still
+  need a rollback story.
 
 ### Deferred after evaluation (with reasons)
 - Template center (`/api/template-center/*`) — content-management surface,

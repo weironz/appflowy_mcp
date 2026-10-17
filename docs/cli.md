@@ -119,6 +119,16 @@ appflowy serve --http 0.0.0.0:8000 --allow-remote
 
 Renaming/copying the binary to `appflowy-mcp` makes it start straight in serve mode (compatible with configs written for the old `appflowy-mcp` entry point). Guardrails and the risks of sharing are covered in [mcp-connect.md](mcp-connect.md).
 
+### `update [--version X.Y.Z] [--check]` — self-update
+
+```bash
+appflowy update                # latest GitHub release -> replace the running binary
+appflowy update --check        # report only, change nothing
+appflowy update --version 0.9.0   # pin a specific release (APPFLOWY_VERSION works too)
+```
+
+Downloads the release asset for your platform (Windows x64 / Linux x64 / macOS arm64), runs `--version` on the download as a smoke test, then swaps it in next to the running executable — the same steps as `install.sh`/`install.ps1`, without re-running the script. The second installed name (`appflowy` ↔ `appflowy-mcp`) is re-synced so both entry points land on the new version. On Windows the running exe is renamed aside to `<file>.old` first; the leftover is swept on the next update run. `update` needs no AppFlowy login and honours `--json`. The install dir must be writable; otherwise fix permissions or fall back to the install script.
+
 ## CI / cron example
 
 ```cron

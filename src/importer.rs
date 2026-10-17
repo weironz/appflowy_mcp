@@ -165,7 +165,13 @@ impl MarkdownImporter {
                 .unwrap_or_default(),
         };
         let page = self
-            .create_markdown_page(&path, parent_view_id, &title, upload_assets, "markdown_file")
+            .create_markdown_page(
+                &path,
+                parent_view_id,
+                &title,
+                upload_assets,
+                "markdown_file",
+            )
             .await;
         Ok(self.summary(page))
     }
@@ -205,8 +211,7 @@ impl MarkdownImporter {
         directory_path: &'a Path,
         parent_view_id: &'a str,
         upload_assets: bool,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<CreatedPage>> + Send + 'a>>
-    {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<CreatedPage>> + Send + 'a>> {
         Box::pin(async move {
             // Precondition: the caller has verified this directory has Markdown in
             // its subtree, so it is worth a page. One scan yields everything we need.
@@ -482,9 +487,10 @@ impl MarkdownImporter {
             let semaphore = Arc::clone(&semaphore);
             tasks.spawn(async move {
                 let result = async {
-                    let _permit = semaphore.acquire_owned().await.map_err(|e| {
-                        Error::Other(format!("upload semaphore closed: {e}"))
-                    })?;
+                    let _permit = semaphore
+                        .acquire_owned()
+                        .await
+                        .map_err(|e| Error::Other(format!("upload semaphore closed: {e}")))?;
                     let content = tokio::fs::read(&path).await?;
                     let content_type = mime_guess::from_path(&path)
                         .first()
@@ -539,7 +545,11 @@ impl MarkdownImporter {
         for (slot, result) in results.into_iter().enumerate() {
             let Some(ok) = result else { continue };
             let asset = &pending[slot];
-            uploaded_url[slot] = ok.upload.get("url").and_then(Value::as_str).map(str::to_string);
+            uploaded_url[slot] = ok
+                .upload
+                .get("url")
+                .and_then(Value::as_str)
+                .map(str::to_string);
             self.uploaded_assets.push(UploadedAsset {
                 source_path: asset.path.display().to_string(),
                 markdown_url: asset.markdown_url.clone(),
@@ -684,10 +694,7 @@ fn resolve_local_asset(markdown_dir: &Path, image_url: &str) -> Option<PathBuf> 
     // cases this importer encounters: strip any query/fragment. For
     // scheme-bearing non-remote URLs the whole string is used as the path —
     // it then fails `is_file` exactly like Python's resolved candidate does.
-    let without_fragment = image_url
-        .split(['?', '#'])
-        .next()
-        .unwrap_or_default();
+    let without_fragment = image_url.split(['?', '#']).next().unwrap_or_default();
     let decoded = percent_encoding::percent_decode_str(without_fragment)
         .decode_utf8_lossy()
         .replace('\\', "/");
@@ -718,7 +725,10 @@ fn scan_dir(directory_path: &Path) -> (Option<PathBuf>, Vec<PathBuf>, Vec<PathBu
     let mut markdown_files: Vec<PathBuf> = Vec::new();
     let mut child_dirs: Vec<PathBuf> = Vec::new();
     let mut entries: Vec<PathBuf> = match fs::read_dir(directory_path) {
-        Ok(rd) => rd.filter_map(std::result::Result::ok).map(|e| e.path()).collect(),
+        Ok(rd) => rd
+            .filter_map(std::result::Result::ok)
+            .map(|e| e.path())
+            .collect(),
         Err(_) => return (None, Vec::new(), Vec::new()),
     };
     entries.sort_by_key(|p| {
@@ -774,7 +784,8 @@ fn full_line_image_re() -> &'static Regex {
 fn inline_image_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(r"!\[(?P<alt>[^\]]*)\]\((?P<url>[^)]+)\)").expect("inline image pattern compiles")
+        Regex::new(r"!\[(?P<alt>[^\]]*)\]\((?P<url>[^)]+)\)")
+            .expect("inline image pattern compiles")
     })
 }
 
@@ -926,7 +937,8 @@ mod tests {
     use std::ffi::OsStr;
 
     fn unique_temp_dir(label: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("appflowy-rs-importer-{label}-{}", Uuid::new_v4()));
+        let dir =
+            std::env::temp_dir().join(format!("appflowy-rs-importer-{label}-{}", Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -1089,7 +1101,8 @@ mod tests {
 
     #[test]
     fn scan_collects_full_line_and_inline_images() {
-        let content = "![full](a.png)\n\ntext with ![inline](b.png) and more\n![also](c.png) after text\n";
+        let content =
+            "![full](a.png)\n\ntext with ![inline](b.png) and more\n![also](c.png) after text\n";
         assert_eq!(urls(content), vec!["a.png", "b.png", "c.png"]);
     }
 
@@ -1182,10 +1195,8 @@ mod tests {
     #[test]
     fn read_markdown_strips_bom_and_decodes_lossy() {
         let dir = unique_temp_dir("read");
-        let mut importer = MarkdownImporter::new(
-            AppFlowyClient::new(None, None, "http://127.0.0.1:1"),
-            "ws",
-        );
+        let mut importer =
+            MarkdownImporter::new(AppFlowyClient::new(None, None, "http://127.0.0.1:1"), "ws");
 
         let bom_path = dir.join("bom.md");
         let mut bytes = vec![0xEF, 0xBB, 0xBF];

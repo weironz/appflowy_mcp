@@ -6,9 +6,9 @@ use std::path::Path;
 
 use reqwest::Method;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::{ErrorData, Json, tool, tool_router};
+use rmcp::{tool, tool_router, ErrorData, Json};
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use crate::server::AppServer;
 use crate::tools::util::map_tool_error;
@@ -70,7 +70,11 @@ fn meeting_base(workspace_id: &str) -> String {
 
 /// Upload a local audio file to file storage via a presigned URL and return
 /// its download URL, which `transcribe-audio` then consumes.
-async fn upload_audio(server: &AppServer, workspace_id: &str, path: &str) -> Result<String, ErrorData> {
+async fn upload_audio(
+    server: &AppServer,
+    workspace_id: &str,
+    path: &str,
+) -> Result<String, ErrorData> {
     let file_path = Path::new(path);
     let bytes = tokio::fs::read(file_path).await.map_err(|err| {
         let message = if err.kind() == ErrorKind::NotFound {

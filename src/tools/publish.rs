@@ -3,9 +3,9 @@
 
 use reqwest::Method;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::{ErrorData, Json, tool, tool_router};
+use rmcp::{tool, tool_router, ErrorData, Json};
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use crate::server::AppServer;
 use crate::tools::util::{ensure_parent_is_not_workspace, map_tool_error, walk_views};
@@ -113,10 +113,7 @@ impl AppServer {
             .client
             .request(
                 Method::POST,
-                &format!(
-                    "/api/workspace/{}/published-duplicate",
-                    params.workspace_id
-                ),
+                &format!("/api/workspace/{}/published-duplicate", params.workspace_id),
                 None,
                 Some(json!({
                     "published_view_id": params.published_view_id,
@@ -398,7 +395,10 @@ impl AppServer {
             // Python matched on `"404" not in str(e)`; branch on the structured
             // HTTP status instead.
             Err(err) if err.status() != Some(404) => Err(map_tool_error(err)),
-            Err(_) => self.list_published_views_fallback(&params.workspace_id).await,
+            Err(_) => {
+                self.list_published_views_fallback(&params.workspace_id)
+                    .await
+            }
         }
     }
 }

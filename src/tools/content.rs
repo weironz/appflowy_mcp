@@ -6,9 +6,9 @@
 
 use reqwest::Method;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::{ErrorData, Json, tool, tool_router};
+use rmcp::{tool, tool_router, ErrorData, Json};
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use crate::importer::MarkdownImporter;
 use crate::markdown::{parse_content_to_blocks, parse_markdown_to_blocks};
@@ -74,11 +74,13 @@ pub struct AppendTextRequest {
 #[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
 pub struct CreateMarkdownPageRequest {
     pub workspace_id: String,
-    #[schemars(description = "view_id of the parent Space or existing Page to create under. \
+    #[schemars(
+        description = "view_id of the parent Space or existing Page to create under. \
         Must NOT be the workspace_id: AppFlowy's hierarchy is workspace -> space -> page, and a \
         view created directly under the workspace root becomes a Space, not a document. Call \
         appflowy_list_spaces to pick a space (or appflowy_create_space to make one) and pass its \
-        view_id here.")]
+        view_id here."
+    )]
     pub parent_view_id: String,
     pub title: String,
     pub content: String,
@@ -96,15 +98,25 @@ pub struct AppendMarkdownRequest {
     pub content: String,
 }
 
+/// Mirrors community PR `appflowy_append_page_link` (`AppendPageLinkRequest`).
+#[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
+pub struct AppendPageLinkRequest {
+    pub workspace_id: String,
+    pub page_id: String,
+    pub target_page_id: String,
+}
+
 /// Mirrors Python `SavePageRequest` (plus the tool-level id).
 #[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
 pub struct SavePageRequest {
     pub workspace_id: String,
-    #[schemars(description = "view_id of the parent Space or existing Page to create under. \
+    #[schemars(
+        description = "view_id of the parent Space or existing Page to create under. \
         Must NOT be the workspace_id: AppFlowy's hierarchy is workspace -> space -> page, and a \
         view created directly under the workspace root becomes a Space, not a document. Call \
         appflowy_list_spaces to pick a space (or appflowy_create_space to make one) and pass its \
-        view_id here.")]
+        view_id here."
+    )]
     pub parent_view_id: String,
     pub title: String,
     pub content: String,
@@ -130,11 +142,13 @@ pub struct AppendPageContentRequest {
 #[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
 pub struct ImportMarkdownFileRequest {
     pub workspace_id: String,
-    #[schemars(description = "view_id of the parent Space or existing Page to create under. \
+    #[schemars(
+        description = "view_id of the parent Space or existing Page to create under. \
         Must NOT be the workspace_id: AppFlowy's hierarchy is workspace -> space -> page, and a \
         view created directly under the workspace root becomes a Space, not a document. Call \
         appflowy_list_spaces to pick a space (or appflowy_create_space to make one) and pass its \
-        view_id here.")]
+        view_id here."
+    )]
     pub parent_view_id: String,
     pub path: String,
     pub title: Option<String>,
@@ -146,11 +160,13 @@ pub struct ImportMarkdownFileRequest {
 #[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
 pub struct ImportMarkdownDirectoryRequest {
     pub workspace_id: String,
-    #[schemars(description = "view_id of the parent Space or existing Page to create under. \
+    #[schemars(
+        description = "view_id of the parent Space or existing Page to create under. \
         Must NOT be the workspace_id: AppFlowy's hierarchy is workspace -> space -> page, and a \
         view created directly under the workspace root becomes a Space, not a document. Call \
         appflowy_list_spaces to pick a space (or appflowy_create_space to make one) and pass its \
-        view_id here.")]
+        view_id here."
+    )]
     pub parent_view_id: String,
     pub path: String,
     #[serde(default = "default_upload_assets")]
@@ -159,6 +175,63 @@ pub struct ImportMarkdownDirectoryRequest {
 
 #[tool_router(router = content_tool_router, vis = "pub(crate)")]
 impl AppServer {
+    /// Send one `append-block` request per top-level block, in input order,
+    /// after reversing each block's direct `children` array.
+    ///
+    /// The `page-view/{id}/append-block` endpoint prepends what it receives:
+    /// the top-level blocks of a single multi-block call are inserted at the
+    /// front of the page (so a 9-block call lands reversed, last block first),
+    /// and each block is inserted by pushing its `children` into the parent
+    /// front-first one by one — at EVERY nesting level (a table's rows come
+    /// out reversed AND each row's cells come out reversed, as verified live).
+    /// Sending top-level blocks one request at a time in the caller's order,
+    /// and recursively pre-reversing every `children` array, undoes both
+    /// reversals (community-verified fix for scrambled append order).
+    ///
+    /// Returns the response of the last request and the number of requests
+    /// sent. Aborts on the first failure, reporting how many blocks had
+    /// already been sent.
+    async fn append_blocks_ordered(
+        &self,
+        workspace_id: &str,
+        page_id: &str,
+        blocks: Vec<Value>,
+    ) -> Result<(Value, usize), ErrorData> {
+        fn server_order(mut block: Value) -> Value {
+            if let Some(children) = block.get_mut("children").and_then(Value::as_array_mut) {
+                *children = children.drain(..).rev().map(server_order).collect();
+            }
+            block
+        }
+
+        let total = blocks.len();
+        let mut last_response = Value::Null;
+        for (index, block) in blocks.into_iter().enumerate() {
+            let block = server_order(block);
+            last_response = self
+                .client
+                .request(
+                    Method::POST,
+                    &format!("/api/workspace/{workspace_id}/page-view/{page_id}/append-block"),
+                    None,
+                    Some(json!({ "blocks": [block] })),
+                )
+                .await
+                .map_err(|err| {
+                    let err = map_tool_error(err);
+                    ErrorData::new(
+                        err.code,
+                        format!(
+                            "append-block aborted after {index}/{total} block(s) sent: {}",
+                            err.message
+                        ),
+                        err.data,
+                    )
+                })?;
+        }
+        Ok((last_response, total))
+    }
+
     #[tool(
         name = "appflowy_append_blocks_to_page",
         description = "Append raw AppFlowy document blocks to the end of a page."
@@ -170,20 +243,10 @@ impl AppServer {
         if request.blocks.is_empty() {
             return Err(ErrorData::invalid_params("blocks must not be empty", None));
         }
-        let data = self
-            .client
-            .request(
-                Method::POST,
-                &format!(
-                    "/api/workspace/{}/page-view/{}/append-block",
-                    request.workspace_id, request.page_id
-                ),
-                None,
-                Some(json!({ "blocks": request.blocks })),
-            )
-            .await
-            .map_err(map_tool_error)?;
-        Ok(Json(data))
+        let (data, calls) = self
+            .append_blocks_ordered(&request.workspace_id, &request.page_id, request.blocks)
+            .await?;
+        Ok(Json(json!({ "result": data, "calls": calls })))
     }
 
     #[tool(
@@ -201,25 +264,17 @@ impl AppServer {
         let blocks: Vec<Value> = request
             .texts
             .iter()
-            .map(|text| json!({
-                "type": request.block_type,
-                "data": {"delta": [{"insert": text}]},
-            }))
+            .map(|text| {
+                json!({
+                    "type": request.block_type,
+                    "data": {"delta": [{"insert": text}]},
+                })
+            })
             .collect();
-        let data = self
-            .client
-            .request(
-                Method::POST,
-                &format!(
-                    "/api/workspace/{}/page-view/{}/append-block",
-                    request.workspace_id, request.page_id
-                ),
-                None,
-                Some(json!({ "blocks": blocks })),
-            )
-            .await
-            .map_err(map_tool_error)?;
-        Ok(Json(data))
+        let (data, calls) = self
+            .append_blocks_ordered(&request.workspace_id, &request.page_id, blocks)
+            .await?;
+        Ok(Json(json!({ "result": data, "calls": calls })))
     }
 
     #[tool(
@@ -261,20 +316,17 @@ impl AppServer {
         require_non_empty(&request.content, "content")?;
         let blocks = parse_markdown_to_blocks(&request.content, None);
         let block_count = blocks.len();
-        let data = self
-            .client
-            .request(
-                Method::POST,
-                &format!(
-                    "/api/workspace/{}/page-view/{}/append-block",
-                    request.workspace_id, request.page_id
-                ),
-                None,
-                Some(json!({ "blocks": blocks })),
-            )
-            .await
-            .map_err(map_tool_error)?;
-        Ok(Json(json!({ "result": data, "block_count": block_count })))
+        let blocks: Vec<Value> = blocks
+            .into_iter()
+            .map(serde_json::to_value)
+            .collect::<Result<_, _>>()
+            .map_err(|err| ErrorData::internal_error(err.to_string(), None))?;
+        let (data, calls) = self
+            .append_blocks_ordered(&request.workspace_id, &request.page_id, blocks)
+            .await?;
+        Ok(Json(
+            json!({ "result": data, "block_count": block_count, "calls": calls }),
+        ))
     }
 
     #[tool(
@@ -322,6 +374,31 @@ impl AppServer {
         let blocks = parse_content_to_blocks(&request.content, &request.content_format)
             .map_err(|message| ErrorData::invalid_params(message, None))?;
         let block_count = blocks.len();
+        let blocks: Vec<Value> = blocks
+            .into_iter()
+            .map(serde_json::to_value)
+            .collect::<Result<_, _>>()
+            .map_err(|err| ErrorData::internal_error(err.to_string(), None))?;
+        let (data, calls) = self
+            .append_blocks_ordered(&request.workspace_id, &request.page_id, blocks)
+            .await?;
+        Ok(Json(json!({
+            "result": data,
+            "block_count": block_count,
+            "calls": calls,
+            "content_format": request.content_format,
+        })))
+    }
+
+    #[tool(
+        name = "appflowy_append_page_link",
+        description = "Append a native Link-to-page block to an AppFlowy document page. This is a real AppFlowy block (not a Markdown hyperlink): in the AppFlowy GUI it renders as a clickable link that jumps straight to the target page."
+    )]
+    async fn appflowy_append_page_link(
+        &self,
+        Parameters(request): Parameters<AppendPageLinkRequest>,
+    ) -> Result<Json<Value>, ErrorData> {
+        require_non_empty(&request.target_page_id, "target_page_id")?;
         let data = self
             .client
             .request(
@@ -331,14 +408,20 @@ impl AppServer {
                     request.workspace_id, request.page_id
                 ),
                 None,
-                Some(json!({ "blocks": blocks })),
+                Some(json!({
+                    "blocks": [{
+                        "type": "linked_page",
+                        "data": { "view_id": request.target_page_id },
+                    }],
+                })),
             )
             .await
             .map_err(map_tool_error)?;
         Ok(Json(json!({
             "result": data,
-            "block_count": block_count,
-            "content_format": request.content_format,
+            "page_id": request.page_id,
+            "target_page_id": request.target_page_id,
+            "block_type": "linked_page",
         })))
     }
 
@@ -354,8 +437,7 @@ impl AppServer {
         ensure_parent_is_not_workspace(&request.workspace_id, &request.parent_view_id)
             .map_err(map_tool_error)?;
         // Fresh importer per call: its accumulation state is per-import.
-        let mut importer =
-            MarkdownImporter::new(self.client.clone(), request.workspace_id.clone());
+        let mut importer = MarkdownImporter::new(self.client.clone(), request.workspace_id.clone());
         let summary = importer
             .import_file(
                 &request.path,
@@ -380,8 +462,7 @@ impl AppServer {
         ensure_parent_is_not_workspace(&request.workspace_id, &request.parent_view_id)
             .map_err(map_tool_error)?;
         // Fresh importer per call: its accumulation state is per-import.
-        let mut importer =
-            MarkdownImporter::new(self.client.clone(), request.workspace_id.clone());
+        let mut importer = MarkdownImporter::new(self.client.clone(), request.workspace_id.clone());
         let summary = importer
             .import_directory(
                 &request.path,

@@ -4,7 +4,7 @@ use std::io::ErrorKind;
 use std::path::PathBuf;
 
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::{ErrorData, Json, tool, tool_router};
+use rmcp::{tool, tool_router, ErrorData, Json};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -53,14 +53,20 @@ impl AppServer {
         Parameters(request): Parameters<UploadFileRequest>,
     ) -> Result<Json<Value>, ErrorData> {
         if request.path.is_empty() {
-            return Err(ErrorData::invalid_params("Local file path to upload.", None));
+            return Err(ErrorData::invalid_params(
+                "Local file path to upload.",
+                None,
+            ));
         }
         let path = expand_tilde(&request.path);
         let content = tokio::fs::read(&path).await.map_err(|err| {
             let message = if err.kind() == ErrorKind::NotFound {
                 format!("Local file to upload not found: {}", path.display())
             } else {
-                format!("Cannot read local file to upload ({}): {err}", path.display())
+                format!(
+                    "Cannot read local file to upload ({}): {err}",
+                    path.display()
+                )
             };
             ErrorData::invalid_params(message, None)
         })?;
@@ -115,10 +121,7 @@ mod tests {
         // join of it and "x", never a literal tilde.
         let home_var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
         if let Some(home) = std::env::var_os(home_var) {
-            assert_eq!(
-                expand_tilde("~/x"),
-                PathBuf::from(&home).join("x"),
-            );
+            assert_eq!(expand_tilde("~/x"), PathBuf::from(&home).join("x"),);
         }
     }
 }

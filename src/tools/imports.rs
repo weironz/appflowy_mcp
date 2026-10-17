@@ -15,9 +15,9 @@ use std::path::Path;
 
 use reqwest::Method;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::{ErrorData, Json, tool, tool_router};
+use rmcp::{tool, tool_router, ErrorData, Json};
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use crate::error::{Error, Result as AppResult};
 use crate::server::AppServer;
@@ -40,7 +40,10 @@ fn document_import_content_type(format: &str) -> &'static str {
 async fn read_import_file(path: &Path) -> AppResult<Vec<u8>> {
     tokio::fs::read(path).await.map_err(|err| {
         if err.kind() == ErrorKind::NotFound {
-            Error::Validation(format!("Local file to import not found: {}", path.display()))
+            Error::Validation(format!(
+                "Local file to import not found: {}",
+                path.display()
+            ))
         } else {
             Error::Other(format!(
                 "Cannot read local file to import ({}): {err}",
@@ -225,7 +228,9 @@ impl AppServer {
             .unwrap_or("grid");
         if !["grid", "board", "calendar"].contains(&layout) {
             return Err(ErrorData::invalid_params(
-                format!("layout must be one of \"grid\", \"board\", \"calendar\", got \"{layout}\""),
+                format!(
+                    "layout must be one of \"grid\", \"board\", \"calendar\", got \"{layout}\""
+                ),
                 None,
             ));
         }
@@ -252,7 +257,10 @@ impl AppServer {
         });
         create_and_upload(
             self,
-            &format!("/api/workspace/{}/database/import/csv", request.workspace_id),
+            &format!(
+                "/api/workspace/{}/database/import/csv",
+                request.workspace_id
+            ),
             payload,
             "text/csv",
             bytes,

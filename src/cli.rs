@@ -23,10 +23,10 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
 use reqwest::Method;
-use rmcp::ServiceExt as _;
 use rmcp::transport::io::stdio;
+use rmcp::ServiceExt as _;
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value, json};
+use serde_json::{json, Map, Value};
 use tracing_subscriber::EnvFilter;
 
 use crate::client::AppFlowyClient;
@@ -35,10 +35,10 @@ use crate::importer::MarkdownImporter;
 use crate::markdown::parse_content_to_blocks;
 use crate::server::AppServer;
 use crate::tools::export::{
-    DEFAULT_PAGE_BACKOFF_SECS, DEFAULT_PAGE_RETRIES, export_views_to_directory,
-    fetch_page_markdown,
+    export_views_to_directory, fetch_page_markdown, DEFAULT_PAGE_BACKOFF_SECS, DEFAULT_PAGE_RETRIES,
 };
 use crate::tools::util::{create_page_with_blocks, unique_path};
+use crate::update::UpdateArgs;
 
 // ==================== argument parsing ====================
 
@@ -122,6 +122,10 @@ enum Command {
     Import(ImportArgs),
     /// Create a page under PATH from Markdown (a file, --content, or stdin).
     Save(SaveArgs),
+    /// Update this binary in place from GitHub Releases (the latest release,
+    /// or --version / APPFLOWY_VERSION to pin). Also re-syncs the
+    /// `appflowy-mcp` sibling name. Needs no AppFlowy login.
+    Update(UpdateArgs),
 }
 
 #[derive(Args)]
@@ -206,8 +210,7 @@ fn expand_tilde(raw: &str) -> PathBuf {
 }
 
 fn config_dir() -> PathBuf {
-    let base = std::env::var("XDG_CONFIG_HOME")
-        .unwrap_or_else(|_| "~/.config".to_string());
+    let base = std::env::var("XDG_CONFIG_HOME").unwrap_or_else(|_| "~/.config".to_string());
     expand_tilde(&base).join("appflowy-cli")
 }
 
@@ -331,7 +334,11 @@ async fn resolve_workspace(client: &AppFlowyClient, token: &str) -> Result<Value
     }
     let mut names: Vec<&str> = workspaces
         .iter()
-        .map(|ws| ws.get("workspace_name").and_then(Value::as_str).unwrap_or("?"))
+        .map(|ws| {
+            ws.get("workspace_name")
+                .and_then(Value::as_str)
+                .unwrap_or("?")
+        })
         .collect();
     names.sort();
     let kind = if matches.is_empty() {
@@ -478,7 +485,11 @@ fn print_pretty<T: Serialize>(data: &T) {
 }
 
 fn view_marker(view: &Value) -> String {
-    if view.get("is_space").and_then(Value::as_bool).unwrap_or(false) {
+    if view
+        .get("is_space")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
         return "space".to_string();
     }
     match view.get("layout") {
@@ -544,7 +555,10 @@ fn prompt_line(prompt: &str, stderr: bool) -> Result<String> {
     if read == 0 {
         return Err(Error::Other("EOF when reading a line".into()));
     }
-    Ok(line.trim_end_matches('\n').trim_end_matches('\r').to_string())
+    Ok(line
+        .trim_end_matches('\n')
+        .trim_end_matches('\r')
+        .to_string())
 }
 
 // ==================== commands ====================
@@ -622,12 +636,12 @@ async fn cmd_workspaces(client: &AppFlowyClient, json_out: bool) -> Result<()> {
     let config = load_config();
     let default = config.get("workspace").and_then(Value::as_str);
     for ws in workspaces.as_array().into_iter().flatten() {
-        let star = if default.is_some() && ws.get("workspace_name").and_then(Value::as_str) == default
-        {
-            "*"
-        } else {
-            " "
-        };
+        let star =
+            if default.is_some() && ws.get("workspace_name").and_then(Value::as_str) == default {
+                "*"
+            } else {
+                " "
+            };
         println!(
             "{star} {}  {}",
             str_field_or(ws, "workspace_id", "None"),
@@ -707,10 +721,7 @@ async fn cmd_search(
     limit: i64,
     json_out: bool,
 ) -> Result<()> {
-    let params = [
-        ("query", query.to_string()),
-        ("limit", limit.to_string()),
-    ];
+    let params = [("query", query.to_string()), ("limit", limit.to_string())];
     let hits = client
         .request(
             Method::GET,
@@ -748,9 +759,7 @@ async fn cmd_export(
 ) -> Result<()> {
     let node = resolve_path(client, workspace_id, path).await?;
     let is_root = path.unwrap_or("").trim_matches('/').is_empty();
-    let is_tree = is_root
-        || truthy(node.get("is_space"))
-        || truthy(node.get("children"));
+    let is_tree = is_root || truthy(node.get("is_space")) || truthy(node.get("children"));
 
     if is_tree {
         let directory = expand_tilde(output);
@@ -978,7 +987,9 @@ async fn ensure_authenticated(client: &AppFlowyClient) -> Result<()> {
             .map(|_| ())
             .map_err(|e| Error::Other(format!("Auto-login failed: {e}")));
     }
-    Err(Error::Other("Not authenticated. Please login first.".into()))
+    Err(Error::Other(
+        "Not authenticated. Please login first.".into(),
+    ))
 }
 
 async fn run_inner(cli: Cli) -> Result<()> {
@@ -986,6 +997,11 @@ async fn run_inner(cli: Cli) -> Result<()> {
         return serve_with(args)
             .await
             .map_err(|e| Error::Other(format!("{e:#}")));
+    }
+
+    // Self-update talks to GitHub, not AppFlowy — skip the auth chain.
+    if let Command::Update(args) = &cli.command {
+        return crate::update::cmd_update(args, cli.json).await;
     }
 
     dotenvy::dotenv().ok();
@@ -1050,7 +1066,7 @@ async fn dispatch(cli: &Cli, client: &AppFlowyClient) -> Result<()> {
             cmd_save(client, &workspace_id, args, cli.json).await
         }
         // Handled in run_inner before the authentication chain.
-        Command::Serve(_) | Command::Login(_) | Command::Logout => Ok(()),
+        Command::Serve(_) | Command::Login(_) | Command::Logout | Command::Update(_) => Ok(()),
     }
 }
 
@@ -1145,11 +1161,10 @@ async fn serve_http(addr: &str, allow_remote: bool) -> anyhow::Result<()> {
 #[doc(hidden)]
 pub fn mcp_http_router(server: &AppServer, allow_remote: bool) -> axum::Router {
     use rmcp::transport::streamable_http_server::{
-        StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
+        session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
     };
 
-    let mut config =
-        StreamableHttpServerConfig::default().enforce_origin_validation();
+    let mut config = StreamableHttpServerConfig::default().enforce_origin_validation();
     if allow_remote {
         config = config.disable_allowed_hosts();
     }

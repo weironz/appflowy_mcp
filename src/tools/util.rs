@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use reqwest::Method;
 use rmcp::ErrorData;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use crate::client::AppFlowyClient;
 use crate::error::{Error, Result};

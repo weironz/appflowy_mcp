@@ -4,9 +4,9 @@ use std::collections::HashMap;
 
 use reqwest::Method;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::{ErrorData, Json, tool, tool_router};
+use rmcp::{tool, tool_router, ErrorData, Json};
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use crate::server::AppServer;
 use crate::tools::export::fetch_collab_markdown;
@@ -281,7 +281,9 @@ impl AppServer {
         )
         .await;
         match markdown {
-            Some(markdown) => Ok(Json(json!({ "object_id": p.page_id, "markdown": markdown }))),
+            Some(markdown) => Ok(Json(
+                json!({ "object_id": p.page_id, "markdown": markdown }),
+            )),
             None => Err(ErrorData::internal_error(
                 "Could not fetch collab content for this object (no document collab).",
                 None,
@@ -510,7 +512,11 @@ impl AppServer {
             };
             if already_in_place {
                 unlink(
-                    slot, &mut head, &mut prev_slot, &mut next_slot, &mut in_list,
+                    slot,
+                    &mut head,
+                    &mut prev_slot,
+                    &mut next_slot,
+                    &mut in_list,
                 );
                 continue;
             }
@@ -532,7 +538,11 @@ impl AppServer {
                 .await
                 .map_err(map_tool_error)?;
             unlink(
-                slot, &mut head, &mut prev_slot, &mut next_slot, &mut in_list,
+                slot,
+                &mut head,
+                &mut prev_slot,
+                &mut next_slot,
+                &mut in_list,
             );
             // Re-insert as the new head of the unplaced suffix (== absolute
             // position `index`, since the placed prefix is fixed).
@@ -667,7 +677,9 @@ impl AppServer {
             )
             .await
             .map_err(map_tool_error)?;
-        Ok(Json(json!({ "page_id": p.page_id, "prev_view_id": p.prev_view_id })))
+        Ok(Json(
+            json!({ "page_id": p.page_id, "prev_view_id": p.prev_view_id }),
+        ))
     }
 
     #[tool(
@@ -790,7 +802,10 @@ impl AppServer {
         self.client
             .request(
                 Method::POST,
-                &format!("/api/workspace/{}/delete-all-pages-from-trash", p.workspace_id),
+                &format!(
+                    "/api/workspace/{}/delete-all-pages-from-trash",
+                    p.workspace_id
+                ),
                 None,
                 Some(json!({})),
             )

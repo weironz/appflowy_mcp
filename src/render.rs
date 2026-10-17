@@ -130,7 +130,8 @@ impl<'a> Renderer<'a> {
             match ty {
                 "heading" => {
                     let level = heading_level(data);
-                    self.lines.push(format!("{prefix}{} {text}", "#".repeat(level)));
+                    self.lines
+                        .push(format!("{prefix}{} {text}", "#".repeat(level)));
                     self.lines.push(String::new());
                 }
                 "bulleted_list" => self.lines.push(format!("{prefix}- {text}")),
@@ -174,7 +175,9 @@ impl<'a> Renderer<'a> {
                 }
                 "callout" => {
                     let callout = match data.get("icon").filter(|v| py_truthy(v)) {
-                        Some(icon) => format!("{} {text}", json_to_display(icon)).trim().to_string(),
+                        Some(icon) => format!("{} {text}", json_to_display(icon))
+                            .trim()
+                            .to_string(),
                         None => text.clone(),
                     };
                     self.lines.push(format!("{prefix}> {callout}"));
@@ -183,7 +186,8 @@ impl<'a> Renderer<'a> {
                 "simple_table" => {
                     let table = self.render_simple_table(block);
                     if table.is_empty() {
-                        self.lines.push(format!("{prefix}<!-- unsupported block: {ty} -->"));
+                        self.lines
+                            .push(format!("{prefix}<!-- unsupported block: {ty} -->"));
                         self.lines.push(String::new());
                     } else {
                         for row in table {
@@ -218,7 +222,8 @@ impl<'a> Renderer<'a> {
                 _ => {
                     // A block type we don't render (e.g. table/grid). Leave a
                     // visible marker so its presence isn't silently lost.
-                    self.lines.push(format!("{prefix}<!-- unsupported block: {ty} -->"));
+                    self.lines
+                        .push(format!("{prefix}<!-- unsupported block: {ty} -->"));
                     self.lines.push(String::new());
                 }
             }
@@ -294,7 +299,10 @@ impl<'a> Renderer<'a> {
                 .collect();
             format!("| {} |", padded.join(" | "))
         };
-        let mut out = vec![fmt(&rows[0]), format!("| {} |", vec!["---"; ncols].join(" | "))];
+        let mut out = vec![
+            fmt(&rows[0]),
+            format!("| {} |", vec!["---"; ncols].join(" | ")),
+        ];
         out.extend(rows[1..].iter().map(|r| fmt(r)));
         out
     }

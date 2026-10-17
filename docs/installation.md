@@ -19,7 +19,7 @@ irm https://raw.githubusercontent.com/weironz/appflowy_mcp/main/install.ps1 | ie
 > If the execution policy blocks the script, bypass it for the current process only:
 > `Set-ExecutionPolicy Bypass -Scope Process -Force; irm ... | iex`
 
-**Updating = re-running the same line** (the script installs the latest release over the existing binary). Pinning a specific version:
+**Updating**: once installed, `appflowy update` self-updates the binary from the latest GitHub release (`--version X.Y.Z` pins, `--check` only reports) — no need to re-run the installer. Re-running the one-liner works too (it installs the latest release over the existing binary). Pinning a specific version:
 
 ```bash
 APPFLOWY_VERSION=0.8.1 curl -fsSL https://raw.githubusercontent.com/weironz/appflowy_mcp/main/install.sh | sh
@@ -78,6 +78,7 @@ Pure rustls with bundled webpki root certificates — no OpenSSL dependency, fri
 - **`appflowy` not found after install**: on Windows, open a **new** terminal (PATH changes only apply to new processes). On Linux/macOS add `~/.local/bin` to your PATH as the script suggests.
 - **Corporate proxy / slow GitHub**: the scripts do not handle proxies or mirrors; download manually, or `cargo build`.
 - **Sanity check**: `appflowy --version` prints `appflowy-cli 0.x.y` — the `-cli` suffix in the version string is a leftover from the historical package name, not the wrong binary.
+- **`appflowy update` fails with "not writable"**: the install dir belongs to another user/root — fix permissions, or re-run the install script with the right privileges. A download 404 means no asset for that platform in that release (see "Prebuilt asset availability").
 
 ## Next steps
 

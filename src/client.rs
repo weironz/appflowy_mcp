@@ -80,7 +80,10 @@ pub struct AppFlowyClient {
 
 enum BodyKind<'a> {
     Json(Option<Value>),
-    Content { bytes: &'a [u8], content_type: &'a str },
+    Content {
+        bytes: &'a [u8],
+        content_type: &'a str,
+    },
 }
 
 impl AppFlowyClient {
@@ -199,7 +202,11 @@ impl AppFlowyClient {
         Ok(token)
     }
 
-    pub async fn get_database_fields(&self, workspace_id: &str, database_id: &str) -> Result<Value> {
+    pub async fn get_database_fields(
+        &self,
+        workspace_id: &str,
+        database_id: &str,
+    ) -> Result<Value> {
         self.request(
             Method::GET,
             &format!("/api/workspace/{workspace_id}/database/{database_id}/fields"),
@@ -209,7 +216,11 @@ impl AppFlowyClient {
         .await
     }
 
-    pub async fn get_database_row_ids(&self, workspace_id: &str, database_id: &str) -> Result<Value> {
+    pub async fn get_database_row_ids(
+        &self,
+        workspace_id: &str,
+        database_id: &str,
+    ) -> Result<Value> {
         self.request(
             Method::GET,
             &format!("/api/workspace/{workspace_id}/database/{database_id}/row"),
@@ -255,7 +266,9 @@ impl AppFlowyClient {
             if let Some(with_doc) = with_doc {
                 params.push(("with_doc", with_doc.to_string()));
             }
-            let body = self.request(Method::GET, &path, Some(&params), None).await?;
+            let body = self
+                .request(Method::GET, &path, Some(&params), None)
+                .await?;
             match body {
                 Value::Array(items) => results.extend(items),
                 other => results.push(other),
@@ -608,7 +621,14 @@ impl AppFlowyClient {
             other => other,
         });
         let response = self
-            .send(&method, path, params, BodyKind::Json(json_payload), true, extra_headers)
+            .send(
+                &method,
+                path,
+                params,
+                BodyKind::Json(json_payload),
+                true,
+                extra_headers,
+            )
             .await?;
         let status = response.status().as_u16();
         let headers = response.headers().clone();
@@ -734,10 +754,7 @@ impl AppFlowyClient {
             let encoded: Vec<String> = params
                 .iter()
                 .map(|(name, value)| {
-                    format!(
-                        "{name}={}",
-                        utf8_percent_encode(value, PATH_ENCODE_SET)
-                    )
+                    format!("{name}={}", utf8_percent_encode(value, PATH_ENCODE_SET))
                 })
                 .collect();
             if !encoded.is_empty() {
@@ -785,9 +802,12 @@ impl AppFlowyClient {
                     Some(payload) => request.json(payload),
                     None => request.header("Content-Type", "application/json"),
                 },
-                BodyKind::Content { bytes, content_type } => {
-                    request.header("Content-Type", *content_type).body(bytes.to_vec())
-                }
+                BodyKind::Content {
+                    bytes,
+                    content_type,
+                } => request
+                    .header("Content-Type", *content_type)
+                    .body(bytes.to_vec()),
             };
             for (name, value) in extra_headers {
                 request = request.header(*name, *value);
@@ -802,8 +822,8 @@ impl AppFlowyClient {
                 }
             }
 
-            let retryable = status == StatusCode::TOO_MANY_REQUESTS
-                || (status.is_server_error() && idempotent);
+            let retryable =
+                status == StatusCode::TOO_MANY_REQUESTS || (status.is_server_error() && idempotent);
             if retryable && attempt < self.inner.max_retries {
                 let delay = self.retry_delay(&response, attempt);
                 attempt += 1;
@@ -924,11 +944,7 @@ mod tests {
     /// refresh/login fallback would fail on transport and return false.
     #[tokio::test]
     async fn reauth_skips_when_token_already_refreshed() {
-        let client = AppFlowyClient::new(
-            Some("e".into()),
-            Some("p".into()),
-            "http://127.0.0.1:1",
-        );
+        let client = AppFlowyClient::new(Some("e".into()), Some("p".into()), "http://127.0.0.1:1");
         client.set_refresh_token(Some("r".into())).await;
         client
             .set_access_token(Some("already-refreshed".into()))

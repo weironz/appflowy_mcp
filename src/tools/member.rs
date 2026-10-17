@@ -2,9 +2,9 @@
 
 use reqwest::Method;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::{ErrorData, Json, tool, tool_router};
+use rmcp::{tool, tool_router, ErrorData, Json};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use crate::server::AppServer;
 use crate::tools::util::map_tool_error;
@@ -123,7 +123,10 @@ pub struct AcceptInvitationParams {
 
 #[tool_router(router = member_tool_router, vis = "pub(crate)")]
 impl AppServer {
-    #[tool(name = "appflowy_create_workspace", description = "Create a new workspace.")]
+    #[tool(
+        name = "appflowy_create_workspace",
+        description = "Create a new workspace."
+    )]
     async fn appflowy_create_workspace(
         &self,
         Parameters(request): Parameters<CreateWorkspaceRequest>,
@@ -365,7 +368,9 @@ impl AppServer {
             )
             .await
             .map_err(map_tool_error)?;
-        Ok(Json(json!({ "status": "removed", "emails": params.emails })))
+        Ok(Json(
+            json!({ "status": "removed", "emails": params.emails }),
+        ))
     }
 
     #[tool(

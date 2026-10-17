@@ -8,7 +8,7 @@
 
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::model::{Implementation, ServerCapabilities, ServerConfig};
-use rmcp::{ServerHandler, tool_handler};
+use rmcp::{tool_handler, ServerHandler};
 
 use crate::client::{AppFlowyClient, DEFAULT_BASE_URL};
 

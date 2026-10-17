@@ -81,7 +81,7 @@ async fn http_initialize_and_list_tools() {
     assert_eq!(list.status(), 200);
     let list_body = rpc_json(&list.text().await.unwrap());
     let tools = list_body["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 114);
+    assert_eq!(tools.len(), 119);
 }
 
 #[tokio::test]

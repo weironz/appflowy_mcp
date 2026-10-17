@@ -2,9 +2,9 @@
 
 use reqwest::Method;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::{ErrorData, Json, tool, tool_router};
+use rmcp::{tool, tool_router, ErrorData, Json};
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use crate::server::AppServer;
 use crate::tools::util::{map_tool_error, walk_views};
@@ -187,14 +187,17 @@ impl AppServer {
         Ok(Json(Value::Array(spaces)))
     }
 
-    #[tool(name = "appflowy_create_space", description = "Create a space in a workspace.")]
+    #[tool(
+        name = "appflowy_create_space",
+        description = "Create a space in a workspace."
+    )]
     async fn appflowy_create_space(
         &self,
         Parameters(request): Parameters<CreateSpaceRequest>,
     ) -> Result<Json<Value>, ErrorData> {
-        let name = request.name.ok_or_else(|| {
-            ErrorData::invalid_params("name is required.", None)
-        })?;
+        let name = request
+            .name
+            .ok_or_else(|| ErrorData::invalid_params("name is required.", None))?;
         validate_space_permission(request.space_permission)?;
         let data = self
             .client
@@ -225,9 +228,9 @@ impl AppServer {
         &self,
         Parameters(request): Parameters<UpdateSpaceRequest>,
     ) -> Result<Json<Value>, ErrorData> {
-        let name = request.name.ok_or_else(|| {
-            ErrorData::invalid_params("name is required.", None)
-        })?;
+        let name = request
+            .name
+            .ok_or_else(|| ErrorData::invalid_params("name is required.", None))?;
         validate_space_permission(request.space_permission)?;
         let data = self
             .client

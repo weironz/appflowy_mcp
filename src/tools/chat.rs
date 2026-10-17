@@ -2,9 +2,9 @@
 
 use reqwest::Method;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::{ErrorData, Json, tool, tool_router};
+use rmcp::{tool, tool_router, ErrorData, Json};
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::server::AppServer;
@@ -68,7 +68,10 @@ impl AppServer {
         Parameters(request): Parameters<CreateChatRequest>,
     ) -> Result<Json<Value>, ErrorData> {
         if request.name.is_empty() {
-            return Err(ErrorData::invalid_params("Chat name must not be empty.", None));
+            return Err(ErrorData::invalid_params(
+                "Chat name must not be empty.",
+                None,
+            ));
         }
         // Python: `request.chat_id or str(uuid.uuid4())` — an empty string
         // chat_id also falls back to a generated uuid.
