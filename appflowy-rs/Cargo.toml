@@ -1,0 +1,43 @@
+[package]
+name = "appflowy-rs"
+version = "0.8.0"
+edition = "2021"
+description = "MCP server and CLI for AppFlowy Cloud (Rust rewrite of appflowy-mcp)"
+
+[lib]
+name = "appflowy_rs"
+path = "src/lib.rs"
+
+[[bin]]
+name = "appflowy"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+dotenvy = "0.15"
+futures = "0.3"
+mime_guess = "2"
+percent-encoding = "2"
+regex = "1"
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "webpki-roots"] }
+rmcp = { version = "3.5", features = ["server", "macros", "transport-io"] }
+schemars = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "fs", "sync", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2"
+uuid = { version = "1", features = ["v4"] }
+yrs = "0.28"
+
+[dev-dependencies]
+httpmock = "0.8"
+tokio = { version = "1", features = ["full"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
