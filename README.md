@@ -6,7 +6,21 @@ Since v0.8.0 the implementation is a single self-contained **Rust binary** — n
 
 ## Installation
 
-> **One-line installers**: Linux/macOS `curl -fsSL https://raw.githubusercontent.com/weironz/appflowy_mcp/main/install.sh | sh` · Windows PowerShell `irm https://raw.githubusercontent.com/weironz/appflowy_mcp/main/install.ps1 | iex` — details in [docs/installation.md](docs/installation.md).
+### One-line installers
+
+Linux / macOS:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/weironz/appflowy_mcp/main/install.sh | sh
+```
+
+Windows (PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/weironz/appflowy_mcp/main/install.ps1 | iex
+```
+
+Script details, version pinning and offline/platform notes: [docs/installation.md](docs/installation.md).
 
 ### Prebuilt binaries
 
