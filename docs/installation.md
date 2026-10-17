@@ -40,7 +40,7 @@ $env:APPFLOWY_VERSION='0.8.0'; irm https://raw.githubusercontent.com/weironz/app
 
 ### ⚠️ 预编译资产现状（重要）
 
-release 资产由 CI 在**打 tag 时**构建。v0.8.0 发布时资产矩阵只有 `appflowy-windows-x64.exe`;Linux/macOS 资产从**下一个 release** 起由 CI 产出（`.github/workflows/release.yml` 已配好四平台矩阵）。在那一刻之前，Linux/macOS 的一键脚本会得到明确的 404 报错——请用手动/源码安装（见下），或直接下载已存在平台的资产。
+release 资产由 CI 在**打 tag 时**构建，当前覆盖 **Windows x64 / Linux x64 / macOS arm64(Apple Silicon)** 三平台。v0.8.0 只有 Windows 资产;**Intel Mac(x86_64)暂不提供预编译资产**——GitHub 的退役代 Intel runner 池长期排队拒绝调度,已在 CI 矩阵中撤下;Intel Mac 请用源码安装(`cargo build --release`,见下)。
 
 ## 卸载
 
