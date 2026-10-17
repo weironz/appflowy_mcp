@@ -6,6 +6,8 @@ Since v0.8.0 the implementation is a single self-contained **Rust binary** — n
 
 ## Installation
 
+> **One-line installers**: Linux/macOS `curl -fsSL https://raw.githubusercontent.com/weironz/appflowy_mcp/main/install.sh | sh` · Windows PowerShell `irm https://raw.githubusercontent.com/weironz/appflowy_mcp/main/install.ps1 | iex` — details in [docs/installation.md](docs/installation.md).
+
 ### Prebuilt binaries
 
 Download the binary for your platform from [GitHub Releases](https://github.com/weironz/appflowy_mcp/releases). One binary serves both entry points:
@@ -25,6 +27,8 @@ cargo build --release
 ```
 
 ## MCP Client Setup
+
+> 中文完整对接指南（Codex / Claude Code / Claude Desktop / Cursor，含 `--scope user` 的 Windows 坑与排错）: [docs/mcp-connect.md](docs/mcp-connect.md).
 
 Point your client at the binary with the `serve` argument. Credentials come from the environment.
 
@@ -107,7 +111,7 @@ To create a page inside a space, pass the workspace ID and use the space `view_i
 
 ## Command-Line Interface
 
-The same binary is a full CLI, aimed at scriptable workflows — backups via cron, bulk import, quick lookups.
+The same binary is a full CLI, aimed at scriptable workflows — backups via cron, bulk import, quick lookups. 中文完整命令参考见 [docs/cli.md](docs/cli.md).
 
 ```bash
 appflowy login          # prompts for email/password; saves session tokens
