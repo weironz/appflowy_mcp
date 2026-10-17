@@ -529,7 +529,7 @@ pub(crate) fn encode_cell(
     }
     let data_cell = |data: std::result::Result<String, String>| -> std::result::Result<JsonMap<String, Value>, String> {
         let mut entries = JsonMap::new();
-        entries.insert("data".to_string(), json!(data.map_err(&field_err)?));
+        entries.insert("data".to_string(), json!(data.map_err(field_err)?));
         Ok(entries)
     };
     match field.field_type {
@@ -549,10 +549,10 @@ pub(crate) fn encode_cell(
             }
         }
         FIELD_TYPE_MULTI_SELECT => {
-            let names = value_as_names(value).map_err(&field_err)?;
+            let names = value_as_names(value).map_err(field_err)?;
             let mut ids = Vec::with_capacity(names.len());
             for name in &names {
-                ids.push(field.option_id(name).map_err(&field_err)?);
+                ids.push(field.option_id(name).map_err(field_err)?);
             }
             data_cell(Ok(ids.join(",")))
         }
@@ -583,14 +583,14 @@ pub(crate) fn encode_cell(
             let mut entries = JsonMap::new();
             entries.insert(
                 "data".to_string(),
-                json!(unix_seconds(&start).map_err(&field_err)?.to_string()),
+                json!(unix_seconds(&start).map_err(field_err)?.to_string()),
             );
             entries.insert("include_time".to_string(), json!(include_time));
             entries.insert("is_range".to_string(), json!(end.is_some()));
             if let Some(end) = end {
                 entries.insert(
                     "end_timestamp".to_string(),
-                    json!(unix_seconds(&end).map_err(&field_err)?.to_string()),
+                    json!(unix_seconds(&end).map_err(field_err)?.to_string()),
                 );
             }
             Ok(entries)
