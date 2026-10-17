@@ -1,16 +1,31 @@
 # AppFlowy MCP
 
-An MCP server and CLI for [AppFlowy](https://github.com/appflowy-io/appflowy) with 73 tools covering workspaces, spaces, pages, page content, Markdown import and export, databases, rows, search, members and invitations, publishing, quick notes, file upload, and AI chat.
+An MCP server and CLI for [AppFlowy](https://github.com/appflowy-io/appflowy) with 81 tools covering workspaces, spaces, pages, page content, Markdown import and export, databases, rows, search, members and invitations, publishing, quick notes, file upload, and AI chat.
 
-## Requirements
-
-- Python 3.14
-- uv
-- AppFlowy account credentials
+Since v0.8.0 the implementation is a single self-contained **Rust binary** (`appflowy-rs/`) — no Python or runtime dependencies. The original Python implementation is kept for reference only (see [Legacy Python](#legacy-python-implementation)).
 
 ## Installation
 
-The package is published on PyPI as [`appflowy-mcp`](https://pypi.org/project/appflowy-mcp/), so all clients can run it with `uvx appflowy-mcp`. Pick your client below.
+### Prebuilt binaries
+
+Download the binary for your platform from [GitHub Releases](https://github.com/weironz/appflowy_mcp/releases). One binary serves both entry points:
+
+- `appflowy` — the CLI. Run `appflowy serve` to start the MCP server over stdio.
+- Rename (or copy) the binary to `appflowy-mcp` (`.exe` on Windows) and it starts the MCP server immediately, mirroring the old Python `appflowy-mcp` entry point. The release ships both names for Windows.
+
+### Build from source
+
+Requires a Rust toolchain ([rustup](https://rustup.rs/)):
+
+```bash
+cd appflowy-rs
+cargo build --release
+# binary: target/release/appflowy (appflowy.exe on Windows)
+```
+
+## MCP Client Setup
+
+Point your client at the binary with the `serve` argument. Credentials come from the environment.
 
 ### Claude Code
 
@@ -18,7 +33,7 @@ The package is published on PyPI as [`appflowy-mcp`](https://pypi.org/project/ap
 claude mcp add appflowy \
   -e APPFLOWY_EMAIL=your-email \
   -e APPFLOWY_PASSWORD=your-password \
-  -- uvx appflowy-mcp
+  -- /path/to/appflowy serve
 ```
 
 ### Codex
@@ -27,7 +42,7 @@ claude mcp add appflowy \
 codex mcp add appflowy \
   --env APPFLOWY_EMAIL=your-email \
   --env APPFLOWY_PASSWORD=your-password \
-  -- uvx appflowy-mcp
+  -- /path/to/appflowy serve
 ```
 
 ### Other MCP Clients
@@ -38,8 +53,8 @@ Any client that supports stdio MCP servers can use this JSON config (Claude Desk
 {
   "mcpServers": {
     "appflowy": {
-      "command": "uvx",
-      "args": ["appflowy-mcp"],
+      "command": "/path/to/appflowy",
+      "args": ["serve"],
       "env": {
         "APPFLOWY_EMAIL": "your-email",
         "APPFLOWY_PASSWORD": "your-password"
@@ -49,35 +64,24 @@ Any client that supports stdio MCP servers can use this JSON config (Claude Desk
 }
 ```
 
-### Local Source (Development)
-
-When developing from a cloned repository, replace `uvx appflowy-mcp` with `uv run` against your checkout. For example with Claude Code:
-
-```bash
-claude mcp add appflowy \
-  -e APPFLOWY_EMAIL=your-email \
-  -e APPFLOWY_PASSWORD=your-password \
-  -- uv run --project /path/to/appflowy_mcp appflowy-mcp
-```
+If you renamed the binary to `appflowy-mcp`, omit the `args` entirely.
 
 ## Environment Variables
-
-Set these environment variables:
 
 ```text
 APPFLOWY_EMAIL=your-email@example.com
 APPFLOWY_PASSWORD=your-password
 ```
 
-With these variables set, tools automatically log in on first use. `appflowy_login` is still available when you want to provide credentials explicitly.
+With these set, the server logs in once at startup and re-authenticates automatically when a token expires (thread-safe refresh). `appflowy_login` is still available to provide credentials at runtime.
 
-For self-hosted AppFlowy, also set the base URL:
+For self-hosted AppFlowy, also set the base URL (defaults to `https://beta.appflowy.cloud`):
 
 ```text
 APPFLOWY_BASE_URL=http://localhost:8000
 ```
 
-If omitted, `APPFLOWY_BASE_URL` defaults to `https://beta.appflowy.cloud`.
+All three variables can also live in a local `.env` file (loaded at startup).
 
 ## AppFlowy Structure
 
@@ -87,7 +91,47 @@ Most write operations need both a workspace and a parent view:
 workspace -> space -> page/database
 ```
 
-To create a page inside a space, pass the workspace ID and use the space `view_id` as `parent_view_id`.
+To create a page inside a space, pass the workspace ID and use the space `view_id` as `parent_view_id`. Passing the workspace ID as a parent is rejected with an actionable error (a child of the workspace root would become a Space, not a document).
+
+## Command-Line Interface
+
+The same binary is a full CLI, aimed at scriptable workflows — backups via cron, bulk import, quick lookups.
+
+```bash
+appflowy login          # prompts for email/password; saves session tokens
+appflowy logout
+```
+
+`login` saves the session tokens (never the password) to `~/.config/appflowy-cli/credentials.json` (mode 600 on Unix) and keeps them fresh across runs (GoTrue refresh-token rotation is persisted). The `APPFLOWY_EMAIL` / `APPFLOWY_PASSWORD` / `APPFLOWY_BASE_URL` environment variables take priority when set.
+
+Addressing follows AppFlowy's hierarchy: pick a workspace once with `use` (or per command with `-w`), then address spaces and pages by PATH — `/`-separated names or UUIDs resolved level by level, case-insensitively:
+
+```bash
+appflowy use test                  # set the default workspace
+appflowy workspaces                # list workspaces (* = default)
+appflowy ls                        # spaces at the workspace root
+appflowy ls demo                   # children of the demo space
+appflowy tree demo                 # full subtree
+appflowy search "query"
+
+# export (Markdown, inline formatting preserved)
+appflowy export demo/notes -o note.md   # leaf page -> one .md file
+appflowy export demo -o ./demo          # space -> directory tree
+appflowy export -o ./backup             # whole workspace
+
+# import / create
+appflowy import demo ./notes            # local dir -> page subtree
+appflowy import demo note.md            # local file -> one page
+echo "# Note" | appflowy save demo "Title"
+
+appflowy -w Programming ls              # one-off workspace override
+```
+
+Every command accepts `--json` for machine-readable output. A nightly workspace backup is one cron line:
+
+```cron
+0 3 * * * APPFLOWY_EMAIL=... APPFLOWY_PASSWORD=... /path/to/appflowy -w <workspace> export -o ~/backups/appflowy-$(date +\%F)
+```
 
 ## Tools
 
@@ -131,6 +175,7 @@ Member roles are `Owner`, `Member`, or `Guest`.
 
 - `appflowy_create_page`
 - `appflowy_get_page`
+- `appflowy_get_collab`
 - `appflowy_update_page`
 - `appflowy_move_page`
 - `appflowy_reorder_pages`
@@ -191,7 +236,7 @@ Example Markdown page:
 }
 ```
 
-Markdown conversion supports headings, paragraphs, dividers, bullet lists, numbered lists, todo lists, quotes, code blocks, image links, and inline bold, italic, strikethrough, code, and links.
+Markdown conversion supports headings, paragraphs, dividers, bullet lists, numbered lists, todo lists, quotes, code blocks, GFM tables, math equations, image links, YAML front-matter stripping, and inline bold, italic, strikethrough, code, and links.
 
 ### Markdown Import
 
@@ -207,7 +252,7 @@ local .md/.markdown file -> AppFlowy page
 
 `README.md` or `index.md` becomes the content of its folder page instead of a separate child page. Other Markdown files in the same folder become child pages. Hidden folders plus `.git`, `.hg`, `.svn`, `.idea`, `.vscode`, `node_modules`, and `__pycache__` are skipped.
 
-Local image references are resolved relative to the Markdown file, uploaded to AppFlowy file storage, and replaced with AppFlowy file URLs:
+Local image references are resolved relative to the Markdown file, uploaded to AppFlowy file storage in parallel (deduplicated per file), and replaced with AppFlowy file URLs:
 
 ```markdown
 ![Architecture](./images/architecture.png)
@@ -243,9 +288,9 @@ Example single-file import:
 - `appflowy_export_space`
 - `appflowy_export_workspace`
 
-AppFlowy-Cloud has no export REST endpoint (the desktop app exports client-side), so these tools rebuild Markdown from the page collab data. The raw yjs update returned by the page-view endpoint is decoded with pycrdt, which preserves inline formatting (bold, italic, strikethrough, inline code, links) that the server's JSON conversion would flatten.
+AppFlowy-Cloud has no export REST endpoint (the desktop app exports client-side), so these tools rebuild Markdown from the page collab data. The raw yjs update returned by the page-view endpoint is decoded natively in Rust ([yrs](https://github.com/y-crdt/y-crdt), the reference implementation of Yjs), which preserves inline formatting (bold, italic, strikethrough, inline code, links) that the server's JSON conversion would flatten.
 
-`appflowy_export_page` writes one page to a local `.md` file. `appflowy_export_space` exports a space (or any page subtree) as a directory tree that mirrors the import convention — a page with children becomes a folder whose own content is `README.md`, leaf pages become `.md` files. `appflowy_export_workspace` does the same for every space in the workspace. Non-document views (grids, boards, calendars) are skipped and reported in warnings, and the destination directory must be empty so existing files are never overwritten.
+`appflowy_export_page` writes one page to a local `.md` file. `appflowy_export_space` exports a space (or any page subtree) as a directory tree that mirrors the import convention — a page with children becomes a folder whose own content is `README.md`, leaf pages become `.md` files. `appflowy_export_workspace` does the same for every space in the workspace. Page Markdown is prefetched concurrently (bounded at 8 workers) with per-page retry and fallback to the raw collab endpoint; pages that still fail are reported as warnings with full attempt traces instead of aborting the run. Non-document views (grids, boards, calendars) are skipped and reported in warnings, and the destination directory must be empty so existing files are never overwritten.
 
 ### Databases And Rows
 
@@ -263,8 +308,9 @@ AppFlowy-Cloud has no export REST endpoint (the desktop app exports client-side)
 ### Search
 
 - `appflowy_search`
+- `appflowy_search_summary`
 
-Full-text search across a workspace. Newly written content can take a short while to appear while the server indexes it.
+Full-text search across a workspace. `appflowy_search_summary` follows up with the server's summary endpoint and returns cited summaries. Newly written content can take a short while to appear while the server indexes it.
 
 ### Publishing
 
@@ -273,8 +319,14 @@ Full-text search across a workspace. Newly written content can take a short whil
 - `appflowy_get_publish_namespace`
 - `appflowy_set_publish_namespace`
 - `appflowy_list_published_views`
+- `appflowy_get_published_outline`
+- `appflowy_get_published_comments`
+- `appflowy_add_published_comment`
+- `appflowy_get_published_reactions`
+- `appflowy_add_published_reaction`
+- `appflowy_duplicate_published_page`
 
-`appflowy_publish_page` returns the publish info (namespace and publish name) for building the public URL. On older server deployments that lack the list endpoint, `appflowy_list_published_views` falls back to walking the workspace folder tree.
+`appflowy_publish_page` returns the publish info (namespace and publish name) for building the public URL. On older server deployments that lack the list endpoint, `appflowy_list_published_views` falls back to walking the workspace folder tree (detected via the structured 404 status, not error-string matching).
 
 ### Quick Notes
 
@@ -303,76 +355,27 @@ Create a chat with `appflowy_create_chat` (optionally passing `rag_ids`, page vi
 
 `appflowy_upload_file` uploads a local file to AppFlowy file storage and returns a URL that image or file blocks can reference. Use the page `view_id` as `parent_dir`.
 
-## Command-Line Interface
+## Legacy Python Implementation
 
-A standalone [`appflowy-cli`](https://pypi.org/project/appflowy-cli/) package (a thin wrapper around this one) exposes the same client as a CLI, aimed at scriptable workflows — backups via cron, bulk import, quick lookups.
+The Python implementation (`appflowy_mcp/` and `appflowy-cli/`) is **deprecated as of v0.8.0** and kept in-tree for reference only. The Rust binary is the maintained implementation.
 
-Authenticate either with the same `APPFLOWY_EMAIL` / `APPFLOWY_PASSWORD` / `APPFLOWY_BASE_URL` environment variables (or a `.env` file), or interactively:
+- PyPI packages [`appflowy-mcp`](https://pypi.org/project/appflowy-mcp/) (final: **0.8.0**) and [`appflowy-cli`](https://pypi.org/project/appflowy-cli/) (final: **0.6.4**) remain installable but will receive no further releases — the release workflow no longer publishes to PyPI.
+- The Rust rewrite is behavior-compatible: same 81 tool names and schemas (verified via `tools/list` diff), same CLI commands and output, same credential file format and location.
+- Beyond parity, the rewrite centralizes error handling (HTTP status/code preserved to the MCP boundary), unwraps the `{code,message,data}` envelope once in the client, retries/renewals auth in one race-safe place, parallelizes export prefetch and asset upload, and keeps full attempt traces on fetch failures.
 
-```bash
-uvx appflowy-cli login          # prompts for email/password
-uvx appflowy-cli logout
-```
-
-`login` saves the session tokens (never the password) to `~/.config/appflowy-cli/credentials.json` with mode 600 and keeps them fresh across runs; environment variables take priority when both are set.
-
-Addressing follows AppFlowy's hierarchy: pick a workspace once with `use` (or per-command with `-w`), then address spaces and pages by PATH — `/`-separated names or UUIDs resolved level by level:
+## Development
 
 ```bash
-appflowy-cli use test                  # set the default workspace
-appflowy-cli workspaces                # list workspaces (* = default)
-appflowy-cli ls                        # spaces at the workspace root
-appflowy-cli ls demo                   # children of the demo space
-appflowy-cli tree demo                 # full subtree
-appflowy-cli search "query"
-
-# export (Markdown, inline formatting preserved)
-appflowy-cli export demo/notes -o note.md   # leaf page -> one .md file
-appflowy-cli export demo -o ./demo          # space -> directory tree
-appflowy-cli export -o ./backup             # whole workspace
-
-# import / create
-appflowy-cli import demo ./notes            # local dir -> page subtree
-appflowy-cli import demo note.md            # local file -> one page
-echo "# Note" | appflowy-cli save demo "Title"
-
-appflowy-cli -w Programming ls              # one-off workspace override
+cd appflowy-rs
+cargo test                 # 75 tests, self-contained (mock servers, real yjs fixtures)
+cargo clippy --all-targets # expected clean
+cargo build --release
 ```
 
-Every command accepts `--json` for machine-readable output. A nightly workspace backup is one cron line:
-
-```cron
-0 3 * * * APPFLOWY_EMAIL=... APPFLOWY_PASSWORD=... uvx appflowy-cli -w <workspace> export -o ~/backups/appflowy-$(date +\%F)
-```
-
-During development, run the CLI from this repository with `uv run python -m appflowy_mcp.cli`.
-
-## Local Run
-
-```bash
-uv run appflowy-mcp
-```
-
-## Publish To PyPI
-
-Build and check the package:
-
-```bash
-uv build
-uv publish --dry-run --trusted-publishing never
-```
-
-Publish with a PyPI API token:
-
-```powershell
-$env:UV_PUBLISH_TOKEN="pypi-your-token"
-uv publish --trusted-publishing never
-```
-
-Do not commit PyPI tokens or write them into project files.
+Crate layout, the tool-registration pattern, and the release process are documented in [`appflowy-rs/README.md`](appflowy-rs/README.md). The old Python development flow (`uv run`, `uv build`, PyPI publishing) applies only to the deprecated implementation.
 
 ## Notes
 
-- Tokens are stored in memory by the MCP server process.
+- Tokens are stored in memory by the MCP server process; the CLI persists them to its credentials file.
 - `APPFLOWY_EMAIL`, `APPFLOWY_PASSWORD`, and `APPFLOWY_BASE_URL` can also be provided through a local `.env` file.
 - Some page and space endpoints are implemented from AppFlowy source routes that are not present in the public OpenAPI document.

@@ -1,8 +1,18 @@
 # Development Roadmap
 
-Prioritized improvements for `appflowy-mcp` (and the `appflowy-cli` shim),
-distilled from a full code audit of the server plus a gap analysis against the
-AppFlowy-Cloud REST API. Ordered by value / risk, not by area.
+> **Status note (v0.8.0):** the project was **rewritten in Rust** (`appflowy-rs/`,
+> released as v0.8.0) and the Python implementation is deprecated; PyPI is
+> frozen at `appflowy-mcp` 0.8.0 / `appflowy-cli` 0.6.4 with no further Python
+> releases planned. Everything marked done below carried over to the Rust
+> implementation 1:1 (81/81 tools, verified via `tools/list` diff); the Rust
+> rewrite additionally fixed the underlying causes of Tier 2 items by
+> construction (single envelope unwrap, typed errors end-to-end, one race-safe
+> auth path). New work happens on the Rust code; the Python paths below are
+> historical context.
+
+Prioritized improvements for `appflowy`, distilled from a full code audit of
+the server plus a gap analysis against the AppFlowy-Cloud REST API. Ordered by
+value / risk, not by area.
 
 Legend: **[ ]** todo · **[~]** partial · **[x]** done
 
@@ -21,15 +31,19 @@ path; `fetch_page_markdown` falls back to it. Field result: for the 19
 "unreachable" pages in the `infrastructure` workspace this endpoint *also*
 returns nothing — confirming that content was never synced to the server (not a
 fetch-method problem). The fallback still helps pages that exist server-side but
-transiently fail page-view.
+transiently fail page-view. *Rust: unchanged, and failures now carry full
+attempt traces instead of being swallowed.*
 
 ### P2 — Parallel export  **[x]** (0.7.0)
-`export_views_to_directory` now prefetches every page's Markdown with a bounded
-thread pool (`EXPORT_MAX_WORKERS=8`) and the tree walk reads from that cache.
-Large workspaces go from minutes to seconds.
+`export_views_to_directory` now prefetches every page's Markdown with bounded
+concurrency and the tree walk reads from that cache. Large workspaces go from
+minutes to seconds. *Rust: thread pool replaced by `tokio` JoinSet + Semaphore
+(same bound, 8).*
 - Deferred: the dedicated **batch** endpoint (`/collab_list`). Its response
-  encodes each collab as **bincode-serialized `EncodedCollab` bytes**, not JSON,
-  so decoding it in Python is fragile; the thread pool gets the same win safely.
+  encodes each collab as **bincode-serialized `EncodedCollab` bytes**, not JSON.
+  *Rust note: this is now much more approachable — decoding bincode collabs in
+  Rust (e.g. with `serde`/`bincode` crates plus AppFlowy's own `collab` crate
+  types) is natural, so the batch endpoint is back on the table.*
 
 ### Markdown round-trip fidelity  **[~]** (0.7.0)
 - [x] Headings **h4–h6** now parse on import (`HEADING_PATTERN`); export already
@@ -55,16 +69,19 @@ Large workspaces go from minutes to seconds.
 
 ---
 
-## Tier 2 — robustness / correctness  **[x]** (0.7.0)
+## Tier 2 — robustness / correctness  **[x]** (0.7.0, absorbed into Rust design)
 - [x] Auto-retry now restricted to idempotent methods on 5xx (POST/PATCH no
   longer retried → no duplicate create/append); 429 still retried for all.
 - [x] Token refresh serialized with a lock + re-check, so concurrent 401s
   (now reachable via the parallel export) can't spend the rotating refresh
   token twice and log the session out.
-- [x] `AppFlowyError(message, status, code)` preserves the AppFlowy error code
-  for 4xx (and the 200-envelope business errors).
-- [x] The HTTP client layer is now unit-tested (`tests/test_client.py`):
-  idempotent retry, 429 retry, 401 reauth, typed errors, refresh re-check.
+- [x] Typed errors preserve the AppFlowy error code (and the 200-envelope
+  business errors) — *Rust: `Error::Api { status, code }` reaches the MCP
+  boundary unparsed, so e.g. `list_published_views` checks `status() == 404`
+  instead of string-matching, and per-tool `ensure_authenticated` /
+  `raise Exception(f"Failed to ...")` boilerplate is gone entirely.*
+- [x] The HTTP client layer is unit-tested (retry, reauth, typed errors);
+  the Rust port keeps those tests and adds server-side coverage.
 
 ---
 
@@ -80,8 +97,16 @@ Large workspaces go from minutes to seconds.
   but are intentionally not exposed (destructive; add on request).
 - [x] **P7 — Published outline** (0.7.0): `appflowy_get_published_outline`
   (`GET /api/workspace/published-outline/{namespace}`, public).
+- [x] **Multi-platform binaries** (0.8.0): the release workflow builds
+  Windows/Linux/macOS (x64 + arm64) binaries and attaches them to GitHub
+  Releases; PyPI publishing removed.
 - [ ] **P4 — Import AppFlowy native `.zip`** — deferred (see research below).
 - [ ] Incremental / skip-unchanged export (by `last_edited_time`).
+- [ ] CLI `login`: mask password input (needs `rpassword`; the Rust port
+  currently reads the password line unmasked).
+- [ ] Import: parallelize sibling page creation while preserving deterministic
+  sibling order (today uploads are parallel, page creation is sequential on
+  purpose; a two-phase create-then-reorder could get both).
 
 ---
 
@@ -90,10 +115,13 @@ Large workspaces go from minutes to seconds.
 ### P8 — Edit existing document content — researched, **deferred**
 Endpoint verified: `POST /api/workspace/v1/{ws}/collab/{object_id}/web-update`,
 body `{ "doc_state": [<int bytes of a raw yjs update>], "collab_type": 0 }`.
-Feasibility: **technically possible** — `pycrdt` is already a dependency, so one
-can load the current document (from the collab endpoint's `doc_state`), mutate
-the CRDT, and emit a yjs update. Risk: the update must encode a *valid* mutation
-in AppFlowy's exact document schema (blocks / text_map / children_map maps); a
+Feasibility: **technically possible** — one can load the current document (from
+the collab endpoint's `doc_state`), mutate the CRDT, and emit a yjs update.
+*Rust note: this got significantly closer in 0.8.0 — the project already depends
+on `yrs`, the reference Rust implementation of Yjs (same author as yjs), and on
+Windows builds AppFlowy's own `collab` crates could be pulled in directly for a
+schema-correct mutation.* Risk: the update must encode a *valid* mutation in
+AppFlowy's exact document schema (blocks / text_map / children_map maps); a
 malformed update merged server-side can corrupt the document. This needs careful
 live testing and a rollback story before shipping — **not done blind.** This is
 the only true feature ceiling (the server is otherwise append-only via

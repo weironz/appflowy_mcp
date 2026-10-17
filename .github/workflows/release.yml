@@ -1,14 +1,15 @@
 name: Release
 
-# One release covers both packages. Bump appflowy-mcp/pyproject.toml (and
-# appflowy-cli/pyproject.toml when the CLI changed), commit, then push a tag
-# matching the appflowy-mcp version:
+# Cut a release:
+#   1. bump `version` in appflowy-rs/Cargo.toml
+#   2. commit, push main
+#   3. git tag vX.Y.Z && git push origin vX.Y.Z
 #
-#   git tag v0.6.4 && git push origin main --tags
-#
-# The workflow verifies the tag matches appflowy-mcp, runs the tests, builds
-# both packages, publishes appflowy-mcp to PyPI (and appflowy-cli too when its
-# version is new), and creates a single GitHub Release with all the artifacts.
+# The workflow verifies the tag matches the Rust crate version, runs the test
+# suite, builds release binaries for Windows/Linux/macOS, and creates a GitHub
+# Release with the binaries attached. PyPI is intentionally NOT published to
+# anymore (the Python implementation is deprecated; the crates' final versions
+# stay installable as-is).
 
 on:
   push:
@@ -17,57 +18,103 @@ on:
 
 permissions:
   contents: write # create the GitHub Release
-  id-token: write # PyPI Trusted Publishing (OIDC)
 
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
-  release:
+  test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
         with:
-          fetch-depth: 0
+          workspaces: appflowy-rs
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@v6
-
-      - name: Verify tag matches appflowy-mcp version
+      - name: Verify tag matches the crate version
         run: |
           tag="${GITHUB_REF_NAME#v}"
-          version="$(uv version --short)"
-          echo "tag=$tag appflowy-mcp=$version"
+          version="$(grep -m1 '^version' appflowy-rs/Cargo.toml | cut -d '"' -f2)"
+          echo "tag=$tag crate=$version"
           if [ "$tag" != "$version" ]; then
-            echo "::error::Tag v$tag does not match appflowy-mcp version $version"
+            echo "::error::Tag v$tag does not match appflowy-rs crate version $version"
             exit 1
           fi
 
       - name: Run tests
-        run: uv run --with pytest pytest -q
+        working-directory: appflowy-rs
+        run: cargo test --all-targets --locked
 
-      - name: Build both packages
+      - name: Clippy
+        working-directory: appflowy-rs
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+  build:
+    needs: test
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: appflowy-windows-x64.exe
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: appflowy-linux-x64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact: appflowy-macos-aarch64
+          - os: macos-13
+            target: x86_64-apple-darwin
+            artifact: appflowy-macos-x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: appflowy-rs
+
+      - name: Build release binary
+        working-directory: appflowy-rs
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Stage artifact
         run: |
-          uv build -o dist
-          (cd appflowy-cli && uv build -o ../dist)
+          mkdir -p dist
+          bin="appflowy-rs/target/${{ matrix.target }}/release/appflowy"
+          if [ ! -f "$bin" ]; then bin="$bin.exe"; fi
+          cp "$bin" "dist/${{ matrix.artifact }}"
+          ls -la dist
 
-      - name: Publish appflowy-mcp to PyPI
-        run: uv publish dist/appflowy_mcp-*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/
+          if-no-files-found: error
 
-      - name: Publish appflowy-cli to PyPI (only when its version is new)
-        run: |
-          cli_version="$(cd appflowy-cli && uv version --short)"
-          if curl -sf -o /dev/null "https://pypi.org/pypi/appflowy-cli/${cli_version}/json"; then
-            echo "appflowy-cli ${cli_version} already on PyPI - skipping publish"
-          else
-            uv publish dist/appflowy_cli-*
-          fi
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: appflowy-*
+          path: dist
+          merge-multiple: true
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            dist/*.whl
-            dist/*.tar.gz
+          files: dist/*
           generate_release_notes: true
