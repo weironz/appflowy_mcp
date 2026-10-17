@@ -67,6 +67,17 @@ Any client that supports stdio MCP servers can use this JSON config (Claude Desk
 
 If you renamed the binary to `appflowy-mcp`, omit the `args` entirely.
 
+### Streamable HTTP
+
+For remote or shared deployments the same server speaks Streamable HTTP:
+
+```bash
+appflowy serve --http 127.0.0.1:8000                # endpoint: http://127.0.0.1:8000/mcp
+appflowy serve --http 0.0.0.0:8000 --allow-remote   # beyond loopback (read below)
+```
+
+Point HTTP-capable clients at `http://ADDR/mcp` (legacy session-mode clients and the newer stateless protocol are both negotiated automatically). Two guardrails are on by default: only loopback `Host` authorities are accepted (DNS-rebinding protection), and requests carrying a browser `Origin` are rejected. Binding a non-loopback address requires `--allow-remote`, which also disables the loopback host allowlist — do that only on a trusted network, because any reachable client can then drive all 81 tools with the server's AppFlowy credentials.
+
 ## Environment Variables
 
 ```text

@@ -60,10 +60,25 @@ struct Cli {
     command: Command,
 }
 
+#[derive(clap::Args, Default)]
+struct ServeArgs {
+    /// Serve Streamable HTTP at ADDR (e.g. 127.0.0.1:8000) instead of stdio.
+    /// The MCP endpoint is http://ADDR/mcp.
+    #[arg(long, value_name = "ADDR")]
+    http: Option<String>,
+    /// Disable loopback restrictions: also accept non-loopback Host headers.
+    /// Required to bind --http to a non-loopback address. Security note: any
+    /// client that can reach the endpoint can drive every MCP tool with the
+    /// server's AppFlowy credentials.
+    #[arg(long)]
+    allow_remote: bool,
+}
+
 #[derive(Subcommand)]
 enum Command {
-    /// Run the MCP server over stdio (same as the `appflowy-mcp` entry point).
-    Serve,
+    /// Run the MCP server over stdio (same as the `appflowy-mcp` entry
+    /// point); pass --http to serve Streamable HTTP instead.
+    Serve(ServeArgs),
     /// Log in and save session tokens for later commands (the password itself
     /// is never stored).
     Login(LoginArgs),
@@ -967,8 +982,8 @@ async fn ensure_authenticated(client: &AppFlowyClient) -> Result<()> {
 }
 
 async fn run_inner(cli: Cli) -> Result<()> {
-    if matches!(cli.command, Command::Serve) {
-        return serve()
+    if let Command::Serve(args) = &cli.command {
+        return serve_with(args)
             .await
             .map_err(|e| Error::Other(format!("{e:#}")));
     }
@@ -1035,7 +1050,7 @@ async fn dispatch(cli: &Cli, client: &AppFlowyClient) -> Result<()> {
             cmd_save(client, &workspace_id, args, cli.json).await
         }
         // Handled in run_inner before the authentication chain.
-        Command::Serve | Command::Login(_) | Command::Logout => Ok(()),
+        Command::Serve(_) | Command::Login(_) | Command::Logout => Ok(()),
     }
 }
 
@@ -1054,16 +1069,26 @@ pub async fn run() -> i32 {
     }
 }
 
+/// MCP logs never go to stdout: stdio mode uses stdout as the protocol
+/// channel, and the HTTP mode keeps it clean for consistency. Idempotent —
+/// both serve paths (and tests) may call this.
+fn init_tracing() {
+    static INIT: std::sync::Once = std::sync::Once::new();
+    INIT.call_once(|| {
+        tracing_subscriber::fmt()
+            .with_env_filter(
+                EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+            )
+            .with_writer(std::io::stderr)
+            .with_ansi(false)
+            .init();
+    });
+}
+
 /// MCP server over stdio (the `appflowy-mcp` entry point). stdout is the
 /// protocol channel — every log line must go to stderr.
 pub async fn serve() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .with_writer(std::io::stderr)
-        .with_ansi(false)
-        .init();
+    init_tracing();
 
     dotenvy::dotenv().ok();
     let server = AppServer::from_env();
@@ -1072,4 +1097,68 @@ pub async fn serve() -> anyhow::Result<()> {
     let service = server.serve(stdio()).await?;
     service.waiting().await?;
     Ok(())
+}
+
+/// Entry for the CLI `serve` subcommand: stdio by default, Streamable HTTP
+/// when `--http` is given.
+async fn serve_with(args: &ServeArgs) -> anyhow::Result<()> {
+    match &args.http {
+        None => serve().await,
+        Some(addr) => serve_http(addr, args.allow_remote).await,
+    }
+}
+
+/// MCP server over Streamable HTTP at `http://ADDR/mcp`.
+async fn serve_http(addr: &str, allow_remote: bool) -> anyhow::Result<()> {
+    init_tracing();
+
+    let bind: std::net::SocketAddr = addr
+        .parse()
+        .map_err(|e| anyhow::anyhow!("invalid --http address {addr:?}: {e}"))?;
+    if !bind.ip().is_loopback() && !allow_remote {
+        anyhow::bail!(
+            "refusing to bind the MCP HTTP server to non-loopback {bind} without \
+             `--allow-remote`: any reachable client could drive every tool with \
+             your AppFlowy credentials. Re-run with --allow-remote to override."
+        );
+    }
+
+    dotenvy::dotenv().ok();
+    let server = AppServer::from_env();
+    server.warm_login().await;
+
+    let listener = tokio::net::TcpListener::bind(bind).await?;
+    let local = listener.local_addr()?;
+    tracing::info!("MCP Streamable HTTP listening on http://{local}/mcp");
+    axum::serve(listener, mcp_http_router(&server, allow_remote))
+        .with_graceful_shutdown(async {
+            let _ = tokio::signal::ctrl_c().await;
+        })
+        .await?;
+    Ok(())
+}
+
+/// The `/mcp` router for Streamable HTTP, pub for tests. Defaults: only
+/// loopback `Host` authorities pass (DNS-rebinding protection), and any
+/// browser `Origin` is rejected; `allow_remote` disables the host allowlist
+/// for public deployments.
+#[doc(hidden)]
+pub fn mcp_http_router(server: &AppServer, allow_remote: bool) -> axum::Router {
+    use rmcp::transport::streamable_http_server::{
+        StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
+    };
+
+    let mut config =
+        StreamableHttpServerConfig::default().enforce_origin_validation();
+    if allow_remote {
+        config = config.disable_allowed_hosts();
+    }
+
+    let handler = server.clone();
+    let service = StreamableHttpService::new(
+        move || -> std::result::Result<AppServer, std::io::Error> { Ok(handler.clone()) },
+        std::sync::Arc::new(LocalSessionManager::default()),
+        config,
+    );
+    axum::Router::new().route_service("/mcp", service)
 }
