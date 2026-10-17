@@ -6,11 +6,11 @@
 //! ([`crate::collab_doc`]) → push the diff since the fetched state vector.
 //! The rollback story: every mutating tool accepts `snapshot_path` to save
 //! the pre-edit full document state, and `appflowy_restore_document_snapshot`
-//! pushes such a snapshot back as a whole-state update.
+//! rebuilds it as fresh blocks over a detached current document (tombstoned
+//! content cannot be revived by a raw whole-state push-back).
 
 use std::path::Path;
 
-use reqwest::Method;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{tool, tool_router, Json};
 use serde::Deserialize;
