@@ -23,6 +23,18 @@ pub const DEFAULT_BASE_URL: &str = "https://beta.appflowy.cloud";
 /// under common URL-length limits when a database has many rows.
 const ROW_DETAIL_BATCH_SIZE: usize = 100;
 
+/// AppFlowy-Web `CHUNK_SIZE` from `multipart-upload.types.ts`: 5MB, the S3
+/// minimum part size. Also the threshold (their `MULTIPART_THRESHOLD`) at or
+/// above which a file moves from single-shot to multipart upload.
+pub const MULTIPART_CHUNK_SIZE_BYTES: usize = 5 * 1024 * 1024;
+
+/// AppFlowy-Web `MAX_CONCURRENCY`: max parallel in-flight part uploads.
+const MULTIPART_MAX_CONCURRENCY: usize = 3;
+
+/// Per-part retries after the first attempt, with 1s/2s/4s backoff
+/// (AppFlowy-Web `MAX_RETRIES`, its exponential-backoff sequence).
+const MULTIPART_MAX_PART_RETRIES: u32 = 3;
+
 /// Equivalent of Python's `urllib.parse.quote(s, safe="")`: everything that
 /// is not an RFC 3986 unreserved character gets percent-encoded.
 const PATH_ENCODE_SET: &AsciiSet = &NON_ALPHANUMERIC
@@ -36,6 +48,15 @@ pub struct TokenResponse {
     pub access_token: String,
     pub refresh_token: String,
     pub expires_in: Option<i64>,
+}
+
+/// A raw response for binary endpoints (e.g. PDF export): success bodies are
+/// delivered untouched; every error shape still surfaces as [`Error`].
+pub struct RawResponse {
+    pub status: u16,
+    pub content_type: Option<String>,
+    pub headers: reqwest::header::HeaderMap,
+    pub body: Vec<u8>,
 }
 
 struct ClientInner {
@@ -149,6 +170,7 @@ impl AppFlowyClient {
                 None,
                 Some(json!({ "email": email, "password": password })),
                 false,
+                &[],
             )
             .await?;
         let token: TokenResponse = serde_json::from_value(body)?;
@@ -169,6 +191,7 @@ impl AppFlowyClient {
                 None,
                 Some(json!({ "refresh_token": refresh_token })),
                 false,
+                &[],
             )
             .await?;
         let token: TokenResponse = serde_json::from_value(body)?;
@@ -351,6 +374,195 @@ impl AppFlowyClient {
         )
     }
 
+    /// Multipart upload, following AppFlowy-Web `multipart-upload.ts`:
+    /// create session → PUT each [`MULTIPART_CHUNK_SIZE_BYTES`] chunk as a
+    /// numbered part (1-based) with bounded parallelism and per-part retries
+    /// → complete; any failure aborts the session best-effort before the
+    /// original error is returned. On success returns the same shape as
+    /// [`Self::upload_file_blob_v1`].
+    pub async fn upload_file_multipart(
+        &self,
+        workspace_id: &str,
+        parent_dir: &str,
+        content: &[u8],
+        content_type: &str,
+    ) -> Result<Value> {
+        // The client picks the file id up front (uuid v4) so create/complete
+        // and the final blob URL can all reference it.
+        let file_id = uuid::Uuid::new_v4().to_string();
+        let data = self
+            .request(
+                Method::POST,
+                &format!("/api/file_storage/{workspace_id}/create_upload"),
+                None,
+                Some(json!({
+                    "file_id": file_id,
+                    "parent_dir": parent_dir,
+                    "content_type": content_type,
+                    "file_size": content.len(),
+                })),
+            )
+            .await?;
+        let upload_id = data
+            .get("upload_id")
+            .and_then(Value::as_str)
+            .filter(|upload_id| !upload_id.is_empty())
+            .map(str::to_string);
+        let Some(upload_id) = upload_id else {
+            return Err(Error::Other(
+                "Create multipart upload response did not include upload_id.".into(),
+            ));
+        };
+
+        match self
+            .upload_parts_and_complete(
+                workspace_id,
+                parent_dir,
+                &file_id,
+                &upload_id,
+                content,
+                content_type,
+            )
+            .await
+        {
+            Ok(data) => Ok(data),
+            Err(err) => {
+                // Best-effort abort so the server does not leak the partial
+                // session; its result never masks the original error.
+                let encoded_parent_dir =
+                    utf8_percent_encode(parent_dir, PATH_ENCODE_SET).to_string();
+                let _ = self
+                    .request(
+                        Method::DELETE,
+                        &format!(
+                            "/api/file_storage/{workspace_id}/upload/{encoded_parent_dir}/{file_id}/{upload_id}"
+                        ),
+                        None,
+                        None,
+                    )
+                    .await;
+                Err(err)
+            }
+        }
+    }
+
+    /// Parts phase (parallel, retried) plus the complete call; builds the
+    /// [`Self::upload_file_blob_v1`]-compatible result object on success.
+    async fn upload_parts_and_complete(
+        &self,
+        workspace_id: &str,
+        parent_dir: &str,
+        file_id: &str,
+        upload_id: &str,
+        content: &[u8],
+        content_type: &str,
+    ) -> Result<Value> {
+        use futures::StreamExt as _;
+
+        let encoded_parent_dir = utf8_percent_encode(parent_dir, PATH_ENCODE_SET).to_string();
+        let chunks: Vec<(usize, &[u8])> = content
+            .chunks(MULTIPART_CHUNK_SIZE_BYTES)
+            .enumerate()
+            .map(|(index, bytes)| (index + 1, bytes))
+            .collect();
+        // Futures are built in a plain loop (not a `.map` closure) so nothing
+        // references a per-item borrow; each future owns its path and the
+        // `&[u8]` slice into `content`.
+        let mut uploads = Vec::with_capacity(chunks.len());
+        for (part_number, bytes) in chunks {
+            let path = format!(
+                "/api/file_storage/{workspace_id}/upload_part/{encoded_parent_dir}/{file_id}/{upload_id}/{part_number}"
+            );
+            uploads.push(async move {
+                let mut attempt = 0u32;
+                loop {
+                    match self
+                        .request_content_inner(
+                            Method::PUT,
+                            &path,
+                            bytes,
+                            "application/octet-stream",
+                            true,
+                        )
+                        .await
+                    {
+                        Ok(data) => {
+                            let e_tag = data
+                                .get("e_tag")
+                                .and_then(Value::as_str)
+                                .filter(|e_tag| !e_tag.is_empty())
+                                .map(str::to_string);
+                            let Some(e_tag) = e_tag else {
+                                return Err(Error::Other(format!(
+                                    "Upload part {part_number} response did not include e_tag."
+                                )));
+                            };
+                            return Ok::<(usize, String), Error>((part_number, e_tag));
+                        }
+                        Err(err)
+                            if attempt < MULTIPART_MAX_PART_RETRIES
+                                && Self::is_transient_part_error(&err) =>
+                        {
+                            attempt += 1;
+                            tokio::time::sleep(Duration::from_secs(1u64 << (attempt - 1))).await;
+                        }
+                        Err(err) => return Err(err),
+                    }
+                }
+            });
+        }
+        let results: Vec<Result<(usize, String)>> = futures::stream::iter(uploads)
+            .buffer_unordered(MULTIPART_MAX_CONCURRENCY)
+            .collect()
+            .await;
+        let mut parts = Vec::with_capacity(results.len());
+        for result in results {
+            parts.push(result?);
+        }
+        // Completion requires the parts ordered by part_number even though
+        // they finished out of order.
+        parts.sort_by_key(|(part_number, _)| *part_number);
+        let parts: Vec<Value> = parts
+            .into_iter()
+            .map(|(part_number, e_tag)| json!({ "part_number": part_number, "e_tag": e_tag }))
+            .collect();
+        let data = self
+            .request(
+                Method::PUT,
+                &format!("/api/file_storage/{workspace_id}/complete_upload"),
+                None,
+                Some(json!({
+                    "file_id": file_id,
+                    "parent_dir": parent_dir,
+                    "upload_id": upload_id,
+                    "parts": parts,
+                })),
+            )
+            .await?;
+        let mut data = match data {
+            Value::Object(map) => map,
+            _ => serde_json::Map::new(),
+        };
+        let url = self
+            .file_blob_url_v1(workspace_id, parent_dir, file_id)
+            .await;
+        data.insert("file_id".into(), json!(file_id));
+        data.insert("workspace_id".into(), json!(workspace_id));
+        data.insert("parent_dir".into(), json!(parent_dir));
+        data.insert("url".into(), json!(url));
+        data.insert("content_type".into(), json!(content_type));
+        data.insert("content_length".into(), json!(content.len()));
+        Ok(Value::Object(data))
+    }
+
+    /// Per-part retry policy: transport failures, 429, and 5xx are transient;
+    /// any other 4xx (including workspace-limit errors surfaced as 402/business
+    /// codes) fails immediately.
+    fn is_transient_part_error(err: &Error) -> bool {
+        matches!(err, Error::Transport(_))
+            || matches!(err.status(), Some(status) if status == 429 || status >= 500)
+    }
+
     /// Generic JSON request used by the MCP tools / importer / CLI.
     pub async fn request(
         &self,
@@ -359,8 +571,90 @@ impl AppFlowyClient {
         params: Option<&[(&str, String)]>,
         json_body: Option<Value>,
     ) -> Result<Value> {
-        self.request_inner(method, path, params, json_body, true)
+        self.request_inner(method, path, params, json_body, true, &[])
             .await
+    }
+
+    /// Like [`Self::request`], with extra per-call headers (e.g. `X-Host` for
+    /// the import/export tasks, `device-id` for comment mutations).
+    pub async fn request_ext(
+        &self,
+        method: Method,
+        path: &str,
+        params: Option<&[(&str, String)]>,
+        json_body: Option<Value>,
+        extra_headers: &[(&str, &str)],
+    ) -> Result<Value> {
+        self.request_inner(method, path, params, json_body, true, extra_headers)
+            .await
+    }
+
+    /// Raw response for binary endpoints (e.g. PDF export). Auth/retry go
+    /// through the same `send` path; JSON responses — including every API
+    /// error shape — are still mapped onto [`Error`]; success bodies are
+    /// returned untouched regardless of type.
+    pub async fn request_bytes_ext(
+        &self,
+        method: Method,
+        path: &str,
+        params: Option<&[(&str, String)]>,
+        json_body: Option<Value>,
+        extra_headers: &[(&str, &str)],
+    ) -> Result<RawResponse> {
+        let json_payload = json_body.map(|body| match body {
+            Value::Object(map) => {
+                Value::Object(map.into_iter().filter(|(_, v)| !v.is_null()).collect())
+            }
+            other => other,
+        });
+        let response = self
+            .send(&method, path, params, BodyKind::Json(json_payload), true, extra_headers)
+            .await?;
+        let status = response.status().as_u16();
+        let headers = response.headers().clone();
+        let content_type = headers
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        let body = response.bytes().await?.to_vec();
+
+        // Error mapping mirrors `handle_response`; success bodies (PDF bytes)
+        // fall through untouched regardless of content type.
+        let looks_json = content_type
+            .as_deref()
+            .is_some_and(|ct| ct.contains("json"))
+            || body.first() == Some(&b'{');
+        if looks_json {
+            if let Ok(Value::Object(map)) = serde_json::from_slice::<Value>(&body) {
+                let code = map.get("code").and_then(Value::as_i64);
+                if status >= 400 || code.is_some_and(|code| code != 0) {
+                    let message = map
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .filter(|message| !message.is_empty())
+                        .map_or_else(|| format!("HTTP {status}"), str::to_string);
+                    return Err(Error::api(message, Some(status), code));
+                }
+            }
+        }
+        if status >= 400 {
+            let snippet: String = String::from_utf8_lossy(&body)
+                .trim()
+                .chars()
+                .take(200)
+                .collect();
+            return Err(Error::NonJsonBody {
+                status,
+                body_snippet: snippet,
+            });
+        }
+
+        Ok(RawResponse {
+            status,
+            content_type,
+            headers,
+            body,
+        })
     }
 
     /// Generic raw-body request (file uploads) with JSON response handling.
@@ -382,6 +676,7 @@ impl AppFlowyClient {
         params: Option<&[(&str, String)]>,
         json_body: Option<Value>,
         allow_reauth: bool,
+        extra_headers: &[(&str, &str)],
     ) -> Result<Value> {
         // Some endpoints (remove members, invite) take a top-level JSON array;
         // only object bodies get the drop-null-values treatment.
@@ -392,7 +687,14 @@ impl AppFlowyClient {
             other => other,
         });
         let response = self
-            .send(&method, path, params, BodyKind::Json(json_payload), allow_reauth)
+            .send(
+                &method,
+                path,
+                params,
+                BodyKind::Json(json_payload),
+                allow_reauth,
+                extra_headers,
+            )
             .await?;
         Self::handle_response(response).await
     }
@@ -415,6 +717,7 @@ impl AppFlowyClient {
                     content_type,
                 },
                 allow_reauth,
+                &[],
             )
             .await?;
         Self::handle_response(response).await
@@ -459,6 +762,7 @@ impl AppFlowyClient {
         params: Option<&[(&str, String)]>,
         body: BodyKind<'_>,
         allow_reauth: bool,
+        extra_headers: &[(&str, &str)],
     ) -> Result<Response> {
         let idempotent = matches!(
             *method,
@@ -485,6 +789,9 @@ impl AppFlowyClient {
                     request.header("Content-Type", *content_type).body(bytes.to_vec())
                 }
             };
+            for (name, value) in extra_headers {
+                request = request.header(*name, *value);
+            }
             let response = request.send().await?;
             let status = response.status();
 

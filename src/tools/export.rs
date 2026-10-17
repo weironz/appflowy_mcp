@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 
+use percent_encoding::percent_decode_str;
 use reqwest::Method;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{ErrorData, Json, tool, tool_router};
@@ -93,6 +94,54 @@ pub struct ExportWorkspaceParams {
     pub workspace_id: String,
     /// Export options.
     pub request: ExportTreeRequest,
+}
+
+/// Options of `appflowy_export_pdf` (server-side PDF rendering of one page).
+#[derive(Debug, Default, Deserialize, rmcp::schemars::JsonSchema)]
+#[serde(default)]
+pub struct ExportPdfRequest {
+    /// Local destination file for the PDF. '.pdf' is appended if the suffix
+    /// differs; parent directories are created; an existing file is never
+    /// overwritten (' (n)' appended instead).
+    pub path: String,
+    /// Render nested child pages into the same PDF. Default true.
+    pub include_nested: Option<bool>,
+    /// Render database views (grids/boards). Default true.
+    pub include_database: Option<bool>,
+    /// Embed images in the PDF. Default true.
+    pub include_images: Option<bool>,
+    /// Maximum nesting depth to render. Default 2.
+    pub max_depth: Option<u32>,
+}
+
+/// Parameters of `appflowy_export_pdf`.
+#[derive(Debug, Default, Deserialize, rmcp::schemars::JsonSchema)]
+#[serde(default)]
+pub struct ExportPdfParams {
+    /// Workspace containing the page.
+    pub workspace_id: String,
+    /// View id of the page to render as PDF.
+    pub page_id: String,
+    /// Export options (`path` is required).
+    pub request: ExportPdfRequest,
+}
+
+/// Options of `appflowy_export_workspace_zip`.
+#[derive(Debug, Default, Deserialize, rmcp::schemars::JsonSchema)]
+#[serde(default)]
+pub struct ExportWorkspaceZipRequest {
+    /// Include uploaded file attachments in the archive. Default true.
+    pub include_file_attachments: Option<bool>,
+}
+
+/// Parameters of `appflowy_export_workspace_zip`.
+#[derive(Debug, Default, Deserialize, rmcp::schemars::JsonSchema)]
+#[serde(default)]
+pub struct ExportWorkspaceZipParams {
+    /// Workspace to back up.
+    pub workspace_id: String,
+    /// Backup options.
+    pub request: ExportWorkspaceZipRequest,
 }
 
 /// Python truthiness for a JSON value (`or`-chain semantics).
@@ -620,6 +669,40 @@ fn export_error(what: &str, e: Error) -> ErrorData {
     ErrorData::internal_error(format!("Failed to export {what}: {e}"), None)
 }
 
+/// RFC 6266 Content-Disposition filename: the extended form
+/// `filename*=UTF-8''<percent-encoded>` wins; falls back to the plain
+/// `filename="..."` parameter. `None` when neither is usable.
+fn content_disposition_filename(headers: &reqwest::header::HeaderMap) -> Option<String> {
+    let value = headers
+        .get(reqwest::header::CONTENT_DISPOSITION)?
+        .to_str()
+        .ok()?;
+    let mut plain: Option<String> = None;
+    for part in value.split(';').map(str::trim) {
+        let Some((key, raw)) = part.split_once('=') else {
+            continue;
+        };
+        let raw = raw.trim().trim_matches('"');
+        match key.trim().to_ascii_lowercase().as_str() {
+            "filename*" => {
+                let encoded = raw
+                    .strip_prefix("UTF-8''")
+                    .or_else(|| raw.strip_prefix("utf-8''"))
+                    .unwrap_or(raw);
+                if let Ok(decoded) = percent_decode_str(encoded).decode_utf8() {
+                    let decoded = decoded.trim();
+                    if !decoded.is_empty() {
+                        return Some(decoded.to_string());
+                    }
+                }
+            }
+            "filename" if !raw.is_empty() => plain = Some(raw.to_string()),
+            _ => {}
+        }
+    }
+    plain
+}
+
 #[tool_router(router = export_tool_router, vis = "pub(crate)")]
 impl AppServer {
     #[tool(
@@ -791,6 +874,132 @@ impl AppServer {
             .map(Json)
             .map_err(|e| export_error("workspace", e))
     }
+
+    #[tool(
+        name = "appflowy_export_pdf",
+        description = "Export a page as a PDF rendered by the AppFlowy server (commercial cloud). Server-side rendering preserves the original layout far more faithfully than appflowy_export_page's Markdown conversion (nested pages, databases, images). The binary PDF is saved to a local file; parent directories are created and an existing file is never overwritten (' (n)' appended)."
+    )]
+    async fn appflowy_export_pdf(
+        &self,
+        Parameters(params): Parameters<ExportPdfParams>,
+    ) -> std::result::Result<Json<Value>, ErrorData> {
+        let ExportPdfParams {
+            workspace_id,
+            page_id,
+            request,
+        } = params;
+        if workspace_id.is_empty() || page_id.is_empty() {
+            return Err(ErrorData::invalid_params(
+                "workspace_id and page_id (view_id of the page) must not be empty",
+                None,
+            ));
+        }
+        if request.path.is_empty() {
+            return Err(ErrorData::invalid_params(
+                "request.path (local destination file) must not be empty",
+                None,
+            ));
+        }
+        let query = [
+            (
+                "include_nested",
+                request.include_nested.unwrap_or(true).to_string(),
+            ),
+            (
+                "include_database",
+                request.include_database.unwrap_or(true).to_string(),
+            ),
+            (
+                "include_images",
+                request.include_images.unwrap_or(true).to_string(),
+            ),
+            ("max_depth", request.max_depth.unwrap_or(2).to_string()),
+        ];
+        let response = self
+            .client
+            .request_bytes_ext(
+                Method::POST,
+                &format!("/api/export/view/{workspace_id}/{page_id}/pdf"),
+                Some(&query),
+                None,
+                &[],
+            )
+            .await
+            .map_err(map_tool_error)?;
+
+        let filename = content_disposition_filename(&response.headers)
+            .unwrap_or_else(|| format!("export-{page_id}.pdf"));
+
+        let mut path = expand_tilde(&request.path);
+        let is_pdf = path
+            .extension()
+            .map(|e| e.to_string_lossy().eq_ignore_ascii_case("pdf"))
+            .unwrap_or(false);
+        if !is_pdf {
+            if let Some(file_name) = path.file_name() {
+                let mut file_name = file_name.to_os_string();
+                file_name.push(".pdf");
+                path.set_file_name(file_name);
+            } else {
+                path.push(".pdf");
+            }
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(Error::Io)
+                .map_err(map_tool_error)?;
+        }
+        let path = unique_path(&path);
+        std::fs::write(&path, &response.body)
+            .map_err(Error::Io)
+            .map_err(map_tool_error)?;
+
+        Ok(Json(json!({
+            "view_id": page_id,
+            "filename": filename,
+            "path": path.display().to_string(),
+            "bytes_written": response.body.len(),
+        })))
+    }
+
+    #[tool(
+        name = "appflowy_export_workspace_zip",
+        description = "Request a full-workspace ZIP backup from the AppFlowy server (commercial cloud). Owner-only endpoint: the archive is built asynchronously and the server emails the workspace owner a download link when it is ready — this call returns the task id, not the archive itself."
+    )]
+    async fn appflowy_export_workspace_zip(
+        &self,
+        Parameters(params): Parameters<ExportWorkspaceZipParams>,
+    ) -> std::result::Result<Json<Value>, ErrorData> {
+        if params.workspace_id.is_empty() {
+            return Err(ErrorData::invalid_params(
+                "workspace_id must not be empty",
+                None,
+            ));
+        }
+        // The AppFlowy gateway requires the deployment's base URL in X-Host.
+        let base_url = self.client.base_url().await;
+        let data = self
+            .client
+            .request_ext(
+                Method::POST,
+                &format!("/api/export/workspace/{}", params.workspace_id),
+                None,
+                Some(json!({
+                    "include_file_attachments": params
+                        .request
+                        .include_file_attachments
+                        .unwrap_or(true),
+                })),
+                &[("X-Host", base_url.as_str())],
+            )
+            .await
+            .map_err(map_tool_error)?;
+        let task_id = data.get("task_id").cloned().unwrap_or(data);
+        Ok(Json(json!({
+            "task_id": task_id,
+            "note": "The server builds the archive asynchronously and emails the workspace owner a download link when it is ready. Owner-only endpoint.",
+        })))
+    }
 }
 
 #[cfg(test)]
@@ -940,5 +1149,41 @@ mod tests {
         assert!(message.contains("attempt 2"), "{message}"); // retries honored
         assert!(message.contains("collab_type=0"), "{message}");
         assert!(message.contains("collab_type=Document"), "{message}");
+    }
+
+    #[test]
+    fn content_disposition_filename_prefers_rfc6266_extended_form() {
+        use reqwest::header::{CONTENT_DISPOSITION, HeaderMap, HeaderValue};
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            CONTENT_DISPOSITION,
+            HeaderValue::from_str(
+                "attachment; filename=\"fallback.pdf\"; filename*=UTF-8''%E6%8A%A5%E8%A1%A8%20v2.pdf",
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            content_disposition_filename(&headers).as_deref(),
+            Some("报表 v2.pdf")
+        );
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            CONTENT_DISPOSITION,
+            HeaderValue::from_str("attachment; filename=\"My Page.pdf\"").unwrap(),
+        );
+        assert_eq!(
+            content_disposition_filename(&headers).as_deref(),
+            Some("My Page.pdf")
+        );
+
+        assert_eq!(content_disposition_filename(&HeaderMap::new()), None);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            CONTENT_DISPOSITION,
+            HeaderValue::from_str("attachment").unwrap(),
+        );
+        assert_eq!(content_disposition_filename(&headers), None);
     }
 }

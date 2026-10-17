@@ -8,6 +8,7 @@ use rmcp::{ErrorData, Json, tool, tool_router};
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::client::MULTIPART_CHUNK_SIZE_BYTES;
 use crate::server::AppServer;
 use crate::tools::util::map_tool_error;
 
@@ -45,7 +46,7 @@ pub struct UploadFileRequest {
 impl AppServer {
     #[tool(
         name = "appflowy_upload_file",
-        description = "Upload a local file to AppFlowy file storage and return its URL, which can be referenced from image or file blocks in pages."
+        description = "Upload a local file to AppFlowy file storage and return its URL, which can be referenced from image or file blocks in pages. Files of 5 MB or larger are uploaded as multipart chunks automatically (parallel parts with per-part retries); smaller files go in a single request."
     )]
     async fn appflowy_upload_file(
         &self,
@@ -71,16 +72,29 @@ impl AppServer {
             .filter(|content_type| !content_type.is_empty())
             .or_else(|| mime_guess::from_path(&path).first_raw().map(str::to_string))
             .unwrap_or_else(|| "application/octet-stream".to_string());
-        let data = self
-            .client
-            .upload_file_blob_v1(
-                &request.workspace_id,
-                &request.parent_dir,
-                &content,
-                &content_type,
-            )
-            .await
-            .map_err(map_tool_error)?;
+        // AppFlowy-Web `MULTIPART_THRESHOLD` equals `CHUNK_SIZE` (5MB): at or
+        // above it, upload in parallel chunks; below it stay on the
+        // single-shot blob v1 endpoint. Both return the same response shape.
+        let data = if content.len() >= MULTIPART_CHUNK_SIZE_BYTES {
+            self.client
+                .upload_file_multipart(
+                    &request.workspace_id,
+                    &request.parent_dir,
+                    &content,
+                    &content_type,
+                )
+                .await
+        } else {
+            self.client
+                .upload_file_blob_v1(
+                    &request.workspace_id,
+                    &request.parent_dir,
+                    &content,
+                    &content_type,
+                )
+                .await
+        }
+        .map_err(map_tool_error)?;
         Ok(Json(data))
     }
 }

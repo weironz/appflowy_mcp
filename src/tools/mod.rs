@@ -3,14 +3,19 @@
 
 pub mod auth;
 pub mod chat;
+pub mod comments;
 pub mod content;
 pub mod database;
 pub mod export;
+pub mod imports;
+pub mod meeting;
 pub mod member;
+pub mod notifications;
 pub mod pages;
 pub mod publish;
 pub mod quicknotes;
 pub mod search;
+pub mod sharing;
 pub mod upload;
 pub mod util;
 pub mod workspace;

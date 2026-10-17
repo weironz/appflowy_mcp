@@ -130,6 +130,67 @@ the only true feature ceiling (the server is otherwise append-only via
 
 ---
 
+## 2026-10 API gap catch-up — shipped (unreleased; tools count 81 -> 114)
+
+Source: AppFlowy-Cloud is archived (open-core now); the freshest public API
+surface is the [AppFlowy-Web client HTTP layer](https://github.com/AppFlowy-IO/AppFlowy-Web/tree/main/src/application/services/js-services/http).
+Everything below was verified against that source. New capabilities that are
+cloud-only must degrade gracefully (404 -> clear error or fallback) because
+older self-hosted images lack them.
+
+### Tier A — high value, low risk
+- [x] **PDF export**: `POST /api/export/view/{ws}/{viewId}/pdf` (nested /
+  database / images / max_depth options; blob + Content-Disposition filename).
+  New tool `appflowy_export_pdf`.
+- [x] **Workspace ZIP backup**: `POST /api/export/workspace/{ws}`
+  (`include_file_attachments`, `X-Host` header; async; owner-only; server
+  emails the download link). New tool `appflowy_export_workspace_zip`.
+- [x] **Document inline comments**:
+  `/api/workspace/{ws}/document/{viewId}/inline-comment` — paginated list,
+  create v2 (block anchor id, reply, @mentions), resolve, delete, reactions
+  (list/add/delete). Mutations carry a `device-id` header. The `/anchor`
+  endpoint (anchor-only yjs update) is intentionally NOT exposed — it is the
+  only sanctioned "limited document write" and needs the P8 treatment first.
+- [x] **Page sharing & access flow**: `PUT /api/sharing/workspace/{ws}/view`
+  (emails + AccessLevel 1..4), access-details v2 (with legacy-POST fallback
+  walking the folder tree for ancestors), revoke, `/api/access-request`
+  send/get/approve, shared-with-me.
+- [x] **Database CSV import**: `POST /api/workspace/{ws}/database/import/csv`
+  (presigned PUT `text/csv`, status poll, cancel).
+- [x] **Document file import**: `POST /api/import/{ws}/document` (doc/docx/
+  html/pdf -> single Document page; presigned PUT with the exact signed
+  content-type; status poll).
+- [x] **Notifications**: `/api/workspace/{ws}/notifications` list /
+  unread-count / read / read-all / archive / archive-all.
+
+### Tier B — valuable, medium effort
+- [x] **Multipart file upload** (>=5 MB): file_storage multipart
+  create/parts/complete/abort; `appflowy_upload_file` switches above the
+  threshold, single-shot below.
+- [x] **AI meeting transcription**: `/api/meeting/{ws}/v2/transcribe-audio`
+  (+ presigned storage PUT for the audio, `create_presigned_url`),
+  get-transcript / get-paragraphs / delete / usage.
+- [x] **Row comment notification**:
+  `/api/workspace/{ws}/database/{db}/row/{rowId}/comment/notification`.
+
+### Deferred after evaluation (with reasons)
+- Template center (`/api/template-center/*`) — content-management surface,
+  weak for agents.
+- Third-party integrations (`/api/integrations/*`) — OAuth connect flows are
+  not agent-drivable; only the proxy-query endpoint is mildly interesting.
+- Database history (`/database/{id}/history*`, restore-jobs) — unique value
+  (rollback) but previews are protobuf blob diffs; revisit with a read-only
+  history list later.
+- Billing — out of scope.
+- P4 note updated: the import flow researched below now also supports
+  importing into an existing workspace under `page_id` (notion/confluence
+  zip), so CSV/document import above ships first; full Notion-zip import
+  remains deferred.
+- P8 unchanged: inline-comment `/anchor` confirms the server only accepts
+  domain-validated partial updates; free-form document editing stays deferred.
+
+---
+
 ## Research notes
 
 ### P4 native import flow (verified, why it's deferred)
