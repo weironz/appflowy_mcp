@@ -3,12 +3,12 @@
 
 use reqwest::Method;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::{tool, tool_router, ErrorData, Json};
+use rmcp::{tool, tool_router, Json};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::server::AppServer;
-use crate::tools::util::{ensure_parent_is_not_workspace, map_tool_error, walk_views};
+use crate::tools::util::{ensure_parent_is_not_workspace, map_tool_error, walk_views, ToolError};
 
 #[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
 pub struct DuplicatePublishedPageParams {
@@ -106,7 +106,7 @@ impl AppServer {
     async fn appflowy_duplicate_published_page(
         &self,
         Parameters(params): Parameters<DuplicatePublishedPageParams>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         ensure_parent_is_not_workspace(&params.workspace_id, &params.dest_view_id)
             .map_err(map_tool_error)?;
         let body = self
@@ -132,7 +132,7 @@ impl AppServer {
     async fn appflowy_get_published_outline(
         &self,
         Parameters(params): Parameters<GetPublishedOutlineParams>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         // Public endpoint: Python intentionally skips `ensure_authenticated`
         // here. The Rust tools have no per-tool auth mechanism, so issuing
         // the request directly matches that intent.
@@ -159,7 +159,7 @@ impl AppServer {
     async fn appflowy_get_published_comments(
         &self,
         Parameters(params): Parameters<PublishedViewParams>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         let body = self
             .client
             .request(
@@ -180,7 +180,7 @@ impl AppServer {
     async fn appflowy_add_published_comment(
         &self,
         Parameters(params): Parameters<AddPublishedCommentParams>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         let body = self
             .client
             .request(
@@ -205,7 +205,7 @@ impl AppServer {
     async fn appflowy_get_published_reactions(
         &self,
         Parameters(params): Parameters<GetPublishedReactionsParams>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         let query: Vec<(&str, String)> = params
             .comment_id
             .as_ref()
@@ -231,7 +231,7 @@ impl AppServer {
     async fn appflowy_add_published_reaction(
         &self,
         Parameters(params): Parameters<AddPublishedReactionParams>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         let body = self
             .client
             .request(
@@ -255,7 +255,7 @@ impl AppServer {
     async fn appflowy_publish_page(
         &self,
         Parameters(params): Parameters<PublishPageParams>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         // Python defaults comments_enabled/duplicate_enabled to true in the
         // request model; honor that when the caller omits them.
         let mut payload = json!({
@@ -301,7 +301,7 @@ impl AppServer {
     async fn appflowy_unpublish_page(
         &self,
         Parameters(params): Parameters<WorkspacePageParams>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         self.client
             .request(
                 Method::POST,
@@ -324,7 +324,7 @@ impl AppServer {
     async fn appflowy_get_publish_namespace(
         &self,
         Parameters(params): Parameters<WorkspaceParams>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         let body = self
             .client
             .request(
@@ -345,7 +345,7 @@ impl AppServer {
     async fn appflowy_set_publish_namespace(
         &self,
         Parameters(params): Parameters<SetPublishNamespaceParams>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         let current = self
             .client
             .request(
@@ -378,7 +378,7 @@ impl AppServer {
     async fn appflowy_list_published_views(
         &self,
         Parameters(params): Parameters<WorkspaceParams>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         match self
             .client
             .request(
@@ -414,7 +414,7 @@ impl AppServer {
     async fn list_published_views_fallback(
         &self,
         workspace_id: &str,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         let query = [("depth", "10".to_string())];
         let root = self
             .client

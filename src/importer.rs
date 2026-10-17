@@ -15,14 +15,23 @@
 //! 2. `parse_markdown_to_blocks` runs with a resolver that is a pure lookup
 //!    into the `original markdown url -> uploaded url` map built by phase 1.
 //!
-//! Page *creation* stays strictly sequential: sibling order under a parent
-//! view is determined by creation order on the AppFlowy side, and creating
-//! pages concurrently would make the imported tree's ordering
-//! nondeterministic. Parallelizing only the uploads captures the bulk of the
-//! win (pages contain many images; the page-create calls themselves are
-//! already one-request-each and must stay ordered anyway).
+//! Page *creation* is parallelized per directory level in two phases:
+//!
+//! A. Every direct Markdown file of one directory runs the full
+//!    read → image-upload → parse → POST /page-view chain concurrently
+//!    (a `JoinSet` + `Semaphore` capped at [`MAX_CONCURRENT_PAGE_CREATES`] —
+//!    more conservative than the upload cap, because each task performs a
+//!    write and may run its own upload batch underneath). Per-task results
+//!    are collected back by file index so merged summaries keep scan order.
+//! B. AppFlowy fixes sibling order by creation order, which concurrency
+//!    scrambles. If the completion order of the creation POSTs no longer
+//!    matches the scan order, the actual order is read back from the folder
+//!    tree and corrected with a minimal sequence of `/move` calls, each
+//!    placing one page right after its intended predecessor. When every
+//!    page happens to complete in order (the common case for small
+//!    directories) the correction pass issues no request at all.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
@@ -53,6 +62,11 @@ const IGNORED_DIRECTORIES: [&str; 7] = [
 
 /// Upper bound on in-flight asset uploads for a single page.
 const MAX_CONCURRENT_UPLOADS: usize = 8;
+
+/// Upper bound on concurrently created sibling pages of one directory. Kept
+/// well below [`MAX_CONCURRENT_UPLOADS`]: every page task performs a write
+/// (POST /page-view) and may run its own upload batch on top of it.
+const MAX_CONCURRENT_PAGE_CREATES: usize = 4;
 
 // ---------------------------------------------------------------------------
 // Report types (serde field order mirrors the Python dict insertion order)
@@ -252,26 +266,15 @@ impl MarkdownImporter {
                 .await?;
             let page_view_id = page.view_id.clone();
 
-            for markdown_path in &markdown_files {
-                if index_file.as_ref() == Some(markdown_path) {
-                    continue;
-                }
-                // Failure is recorded into `errors` inside create_markdown_page /
-                // create_page (they return None); importing continues with the
-                // next file, mirroring the Python try/except.
-                let title = markdown_path
-                    .file_stem()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                self.create_markdown_page(
-                    markdown_path,
-                    &page_view_id,
-                    &title,
-                    upload_assets,
-                    "markdown_file",
-                )
+            let sibling_files: Vec<PathBuf> = markdown_files
+                .iter()
+                .filter(|p| index_file.as_ref() != Some(*p))
+                .cloned()
+                .collect();
+            // Failure of any single file is recorded into `errors` and does
+            // not stop the rest, mirroring the Python try/except.
+            self.create_sibling_markdown_pages(&sibling_files, &page_view_id, upload_assets)
                 .await;
-            }
 
             for child_dir in &child_dirs {
                 if !subtree_has_markdown(child_dir) {
@@ -316,6 +319,198 @@ impl MarkdownImporter {
             self.uploaded_assets.len() - before,
         )
         .await
+    }
+
+    /// Phase A + B of the sibling pipeline (see the module docs): create one
+    /// page per direct Markdown file concurrently, then restore the scan
+    /// order among the created siblings when concurrency scrambled it.
+    async fn create_sibling_markdown_pages(
+        &mut self,
+        markdown_files: &[PathBuf],
+        parent_view_id: &str,
+        upload_assets: bool,
+    ) {
+        if markdown_files.is_empty() {
+            return;
+        }
+        // A single file cannot get out of order; create it inline.
+        if let [path] = markdown_files {
+            let title = path
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            self.create_markdown_page(path, parent_view_id, &title, upload_assets, "markdown_file")
+                .await;
+            return;
+        }
+
+        // --- Phase A: concurrent read → upload → parse → POST /page-view ---
+        // Every task owns a fresh importer so per-page results (assets,
+        // warnings, errors, the created-page entry) accumulate on task-local
+        // state and are merged back by file index below — no shared mutable
+        // state is touched from concurrent tasks.
+        let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_PAGE_CREATES));
+        let mut tasks: JoinSet<(usize, Option<CreatedPage>, MarkdownImporter)> = JoinSet::new();
+        for (index, path) in markdown_files.iter().enumerate() {
+            let client = self.client.clone();
+            let workspace_id = self.workspace_id.clone();
+            let parent_view_id = parent_view_id.to_string();
+            let title = path
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let path = path.clone();
+            let semaphore = Arc::clone(&semaphore);
+            tasks.spawn(async move {
+                let mut sub = MarkdownImporter::new(client, workspace_id);
+                let page = match semaphore.acquire_owned().await {
+                    Ok(_permit) => {
+                        sub.create_markdown_page(
+                            &path,
+                            &parent_view_id,
+                            &title,
+                            upload_assets,
+                            "markdown_file",
+                        )
+                        .await
+                    }
+                    Err(e) => {
+                        sub.errors.push(ImportError {
+                            path: path.display().to_string(),
+                            error: format!("page-create semaphore closed: {e}"),
+                        });
+                        None
+                    }
+                };
+                (index, page, sub)
+            });
+        }
+
+        // The join order also records the order in which the creation POSTs
+        // finished; AppFlowy's sibling order follows that order.
+        let mut outcomes: Vec<Option<(Option<CreatedPage>, MarkdownImporter)>> = Vec::new();
+        outcomes.resize_with(markdown_files.len(), || None);
+        let mut completion_rank: Vec<usize> = vec![usize::MAX; markdown_files.len()];
+        let mut completed = 0usize;
+        while let Some(joined) = tasks.join_next().await {
+            match joined {
+                Ok((index, page, sub)) => {
+                    completion_rank[index] = completed;
+                    outcomes[index] = Some((page, sub));
+                }
+                Err(join_error) => {
+                    // A panicked task carries no index; record a level error.
+                    // Task bodies are infallible except for bugs.
+                    self.errors.push(ImportError {
+                        path: format!("page-create task under {parent_view_id}"),
+                        error: join_error.to_string(),
+                    });
+                }
+            }
+            completed += 1;
+        }
+
+        // Merge in scan order so created_pages / uploaded_assets / warnings /
+        // errors keep a deterministic, index-ordered shape.
+        let mut indexed_view_ids: Vec<(usize, String)> = Vec::new();
+        for (index, outcome) in outcomes.into_iter().enumerate() {
+            let Some((page, mut sub)) = outcome else {
+                continue;
+            };
+            self.uploaded_assets.append(&mut sub.uploaded_assets);
+            self.warnings.append(&mut sub.warnings);
+            self.errors.append(&mut sub.errors);
+            self.created_pages.append(&mut sub.created_pages);
+            if let Some(page) = page {
+                indexed_view_ids.push((index, page.view_id));
+            }
+        }
+
+        // --- Phase B: sibling-order correction -----------------------------
+        let desired: Vec<String> = indexed_view_ids.iter().map(|(_, id)| id.clone()).collect();
+        let mut by_completion = indexed_view_ids;
+        by_completion.sort_by_key(|(index, _)| completion_rank[*index]);
+        let completion_order: Vec<String> = by_completion.into_iter().map(|(_, id)| id).collect();
+        // Fast path: every creation POST finished in scan order (the common
+        // case), so the AppFlowy sibling order already matches and the
+        // correction pass needs no extra request at all.
+        if completion_order != desired {
+            self.correct_sibling_order(parent_view_id, &desired).await;
+        }
+    }
+
+    /// Reads the actual sibling order of the `desired` pages back from the
+    /// folder tree and issues the minimal `/move` sequence that restores the
+    /// `desired` order. Failures are recorded into `errors` and do not stop
+    /// the remaining moves or the import.
+    async fn correct_sibling_order(&mut self, parent_view_id: &str, desired: &[String]) {
+        if desired.len() < 2 {
+            return;
+        }
+        let params = [
+            ("depth", "1".to_string()),
+            ("root_view_id", parent_view_id.to_string()),
+        ];
+        let data = match self
+            .client
+            .request(
+                Method::GET,
+                &format!("/api/workspace/{}/folder", self.workspace_id),
+                Some(&params),
+                None,
+            )
+            .await
+        {
+            Ok(data) => data,
+            Err(e) => {
+                self.errors.push(ImportError {
+                    path: format!("sibling order check under {parent_view_id}"),
+                    error: e.to_string(),
+                });
+                return;
+            }
+        };
+        // Restrict to the pages this import just created; pre-existing
+        // siblings participate only as fixed anchors via prev_view_id.
+        let created: HashSet<&str> = desired.iter().map(String::as_str).collect();
+        let actual: Vec<String> = data
+            .get("children")
+            .and_then(Value::as_array)
+            .map(|children| {
+                children
+                    .iter()
+                    .filter_map(|child| child.get("view_id").and_then(Value::as_str))
+                    .filter(|id| created.contains(id))
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        for action in plan_order_correction(&actual, desired) {
+            let path = format!(
+                "/api/workspace/{}/page-view/{}/move",
+                self.workspace_id, action.view_id
+            );
+            let payload = json!({
+                "new_parent_view_id": parent_view_id,
+                "prev_view_id": action.prev_view_id,
+            });
+            // Sequential on purpose: each move is anchored at the page placed
+            // by the previous one (AppFlowy has no bulk-reorder endpoint).
+            if let Err(e) = self
+                .client
+                .request(Method::POST, &path, None, Some(payload))
+                .await
+            {
+                self.errors.push(ImportError {
+                    path: format!(
+                        "sibling reorder of {} under {parent_view_id}",
+                        action.view_id
+                    ),
+                    error: e.to_string(),
+                });
+            }
+        }
     }
 
     /// Mirrors `_create_page`: POST /api/workspace/{wid}/page-view; on failure
@@ -771,6 +966,64 @@ fn subtree_has_markdown(directory_path: &Path) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// Sibling-order correction plan
+// ---------------------------------------------------------------------------
+
+/// One planned reordering step: place `view_id` immediately after
+/// `prev_view_id` (`None` = make it the first child), mirroring the
+/// `/page-view/{id}/move` endpoint's semantics.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SiblingMove {
+    view_id: String,
+    prev_view_id: Option<String>,
+}
+
+/// Compute the reordering steps that turn `actual` into `desired`, both
+/// restricted to the same set of view_ids (ids of `desired` missing from
+/// `actual` — e.g. a page whose creation failed — are skipped).
+///
+/// Strategy: walk `desired` left to right over a simulated order; a page
+/// already sitting at its final absolute position is left untouched, every
+/// other page is moved once behind its intended predecessor. In-order
+/// prefixes therefore cost nothing, only misplaced pages are moved, each
+/// exactly once, and since the last page can never be the only one out of
+/// place the worst case is `n - 1` moves for `n` pages (a fully reversed
+/// order).
+fn plan_order_correction(actual: &[String], desired: &[String]) -> Vec<SiblingMove> {
+    let exists: HashSet<&str> = actual.iter().map(String::as_str).collect();
+    let wanted: Vec<&str> = desired
+        .iter()
+        .map(String::as_str)
+        .filter(|id| exists.contains(id))
+        .collect();
+    if wanted.len() < 2 {
+        return Vec::new();
+    }
+    let wanted_set: HashSet<&str> = wanted.iter().copied().collect();
+    let mut current: Vec<&str> = actual
+        .iter()
+        .map(String::as_str)
+        .filter(|id| wanted_set.contains(id))
+        .collect();
+    let mut moves = Vec::new();
+    for (index, &id) in wanted.iter().enumerate() {
+        let Some(position) = current.iter().position(|&x| x == id) else {
+            continue;
+        };
+        if position == index {
+            continue;
+        }
+        current.remove(position);
+        current.insert(index, id);
+        moves.push(SiblingMove {
+            view_id: id.to_string(),
+            prev_view_id: (index > 0).then(|| wanted[index - 1].to_string()),
+        });
+    }
+    moves
+}
+
+// ---------------------------------------------------------------------------
 // Image-reference pre-scan
 // ---------------------------------------------------------------------------
 
@@ -1212,5 +1465,121 @@ mod tests {
         assert!(importer.warnings[0].starts_with("File is not valid UTF-8"));
 
         fs::remove_dir_all(&dir).ok();
+    }
+
+    // -- plan_order_correction (sibling-order repair) ------------------------
+
+    fn str_ids(ids: &[&str]) -> Vec<String> {
+        ids.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// Apply a planned move sequence the way the AppFlowy move endpoint
+    /// would: remove the page, then re-insert it immediately behind
+    /// `prev_view_id` (or at the very front when `prev_view_id` is None).
+    fn apply_moves(actual: &[String], moves: &[SiblingMove]) -> Vec<String> {
+        let mut current = actual.to_vec();
+        for action in moves {
+            current.retain(|id| id != &action.view_id);
+            let position = match &action.prev_view_id {
+                None => 0,
+                Some(prev) => current
+                    .iter()
+                    .position(|id| id == prev)
+                    .map(|p| p + 1)
+                    .unwrap_or(current.len()),
+            };
+            current.insert(position, action.view_id.clone());
+        }
+        current
+    }
+
+    #[test]
+    fn order_correction_is_empty_when_already_ordered() {
+        let desired = str_ids(&["a", "b", "c"]);
+        assert!(plan_order_correction(&desired, &desired).is_empty());
+    }
+
+    #[test]
+    fn order_correction_moves_single_misplaced_page_once() {
+        let desired = str_ids(&["a", "b", "c"]);
+        let actual = str_ids(&["b", "a", "c"]);
+        let moves = plan_order_correction(&actual, &desired);
+        assert_eq!(
+            moves,
+            vec![SiblingMove {
+                view_id: "a".into(),
+                prev_view_id: None, // front: it precedes everything
+            }]
+        );
+        assert_eq!(apply_moves(&actual, &moves), desired);
+    }
+
+    #[test]
+    fn order_correction_skips_in_order_prefixes() {
+        // Only the tail is scrambled; the settled prefix costs no move.
+        let desired = str_ids(&["a", "b", "c", "d", "e"]);
+        let actual = str_ids(&["a", "b", "c", "e", "d"]);
+        let moves = plan_order_correction(&actual, &desired);
+        assert_eq!(
+            moves,
+            vec![SiblingMove {
+                view_id: "d".into(),
+                prev_view_id: Some("c".into()),
+            }]
+        );
+        assert_eq!(apply_moves(&actual, &moves), desired);
+    }
+
+    #[test]
+    fn order_correction_reversed_order_needs_n_minus_one_moves() {
+        let desired = str_ids(&["a", "b", "c", "d", "e", "f", "g", "h"]);
+        let actual: Vec<String> = desired.iter().rev().cloned().collect();
+        let moves = plan_order_correction(&actual, &desired);
+        // The worst case: every page but the last is out of place.
+        assert_eq!(moves.len(), desired.len() - 1);
+        assert_eq!(moves[0].prev_view_id, None);
+        assert_eq!(apply_moves(&actual, &moves), desired);
+    }
+
+    #[test]
+    fn order_correction_converges_for_scrambled_orders() {
+        let desired = str_ids(&["a", "b", "c", "d", "e"]);
+        for actual_strs in [
+            &["a", "c", "b", "e", "d"][..],
+            &["e", "d", "c", "b", "a"][..],
+            &["b", "c", "d", "e", "a"][..],
+            &["c", "a", "e", "b", "d"][..],
+            &["d", "e", "a", "b", "c"][..],
+        ] {
+            let actual = str_ids(actual_strs);
+            let moves = plan_order_correction(&actual, &desired);
+            assert!(
+                moves.len() < desired.len(),
+                "never more than n - 1 moves: {actual:?} -> {moves:?}"
+            );
+            assert_eq!(apply_moves(&actual, &moves), desired, "for {actual:?}");
+        }
+    }
+
+    #[test]
+    fn order_correction_skips_pages_missing_from_actual() {
+        // "b" was never created (its creation failed upstream), so the plan
+        // only reorders the pages that actually exist.
+        let desired = str_ids(&["a", "b", "c"]);
+        let actual = str_ids(&["c", "a"]);
+        let moves = plan_order_correction(&actual, &desired);
+        assert_eq!(
+            moves,
+            vec![SiblingMove {
+                view_id: "a".into(),
+                prev_view_id: None,
+            }]
+        );
+        assert_eq!(apply_moves(&actual, &moves), str_ids(&["a", "c"]));
+
+        // Fewer than two existing pages can never be out of order.
+        let actual = str_ids(&["b"]);
+        assert!(plan_order_correction(&actual, &desired).is_empty());
+        assert!(plan_order_correction(&[], &desired).is_empty());
     }
 }

@@ -4,13 +4,13 @@ use std::io::ErrorKind;
 use std::path::PathBuf;
 
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::{tool, tool_router, ErrorData, Json};
+use rmcp::{tool, tool_router, Json};
 use serde::Deserialize;
 use serde_json::Value;
 
 use crate::client::MULTIPART_CHUNK_SIZE_BYTES;
 use crate::server::AppServer;
-use crate::tools::util::map_tool_error;
+use crate::tools::util::{map_tool_error, ToolError};
 
 /// Minimal port of Python `Path.expanduser()`: expands a leading `~` (bare,
 /// `~/...`, or `~\...`) against `$USERPROFILE` (Windows) or `$HOME`. The
@@ -51,12 +51,9 @@ impl AppServer {
     async fn appflowy_upload_file(
         &self,
         Parameters(request): Parameters<UploadFileRequest>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         if request.path.is_empty() {
-            return Err(ErrorData::invalid_params(
-                "Local file path to upload.",
-                None,
-            ));
+            return Err(ToolError::validation("Local file path to upload."));
         }
         let path = expand_tilde(&request.path);
         let content = tokio::fs::read(&path).await.map_err(|err| {
@@ -68,7 +65,7 @@ impl AppServer {
                     path.display()
                 )
             };
-            ErrorData::invalid_params(message, None)
+            ToolError::validation(message)
         })?;
         // Python: `request.content_type or mimetypes.guess_type(path.name)[0]
         // or "application/octet-stream"` — an empty content_type is falsy and

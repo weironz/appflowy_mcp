@@ -23,6 +23,7 @@ mime_guess = "2"
 percent-encoding = "2"
 regex = "1"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "webpki-roots"] }
+rpassword = "5"
 rmcp = { version = "3.5", features = ["server", "macros", "transport-io", "transport-streamable-http-server"] }
 schemars = "1"
 serde = { version = "1", features = ["derive"] }

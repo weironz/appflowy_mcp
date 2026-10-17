@@ -1,6 +1,6 @@
 # AppFlowy MCP
 
-An MCP server and CLI for [AppFlowy](https://github.com/appflowy-io/appflowy) with 114 tools covering workspaces, spaces, pages, page content, Markdown import and export, PDF/ZIP export, databases, rows, CSV/document import, search, members and invitations, page sharing, document comments, publishing, quick notes, notifications, file upload (incl. multipart), and AI chat & meeting transcription.
+An MCP server and CLI for [AppFlowy](https://github.com/appflowy-io/appflowy) with 128 tools covering workspaces, spaces, pages, page content, Markdown import and export, PDF/ZIP export, databases, rows, CSV/document import, search, members and invitations, page sharing, document comments, publishing, quick notes, notifications, file upload (incl. multipart), and AI chat & meeting transcription.
 
 Since v0.8.0 the implementation is a single self-contained **Rust binary** — no Python or runtime dependencies. This repository *is* the Rust project (standard cargo layout); the original Python implementation was removed after the rewrite (see [Legacy Python](#legacy-python-implementation)).
 
@@ -94,7 +94,7 @@ appflowy serve --http 127.0.0.1:8000                # endpoint: http://127.0.0.1
 appflowy serve --http 0.0.0.0:8000 --allow-remote   # beyond loopback (read below)
 ```
 
-Point HTTP-capable clients at `http://ADDR/mcp` (legacy session-mode clients and the newer stateless protocol are both negotiated automatically). Two guardrails are on by default: only loopback `Host` authorities are accepted (DNS-rebinding protection), and requests carrying a browser `Origin` are rejected. Binding a non-loopback address requires `--allow-remote`, which also disables the loopback host allowlist — do that only on a trusted network, because any reachable client can then drive all 114 tools with the server's AppFlowy credentials.
+Point HTTP-capable clients at `http://ADDR/mcp` (legacy session-mode clients and the newer stateless protocol are both negotiated automatically). Two guardrails are on by default: only loopback `Host` authorities are accepted (DNS-rebinding protection), and requests carrying a browser `Origin` are rejected. Binding a non-loopback address requires `--allow-remote`, which also disables the loopback host allowlist — do that only on a trusted network, because any reachable client can then drive all 128 tools with the server's AppFlowy credentials.
 
 ## Environment Variables
 
@@ -234,10 +234,20 @@ AppFlowy has no bulk-sort endpoint; sibling order is controlled by the move endp
 - `appflowy_append_blocks_to_page`
 - `appflowy_create_markdown_page`
 - `appflowy_append_markdown_to_page`
+- `appflowy_append_page_link`
 - `appflowy_import_markdown_file`
 - `appflowy_import_markdown_directory`
 
-Page-content support covers appending new document blocks, creating pages from Markdown, and appending Markdown to existing pages. AppFlowy exposes a high-level `append-block` endpoint, but not a matching high-level REST endpoint for deleting or editing arbitrary existing blocks. Page-level deletion through trash is supported.
+Page-content support covers appending new document blocks, creating pages from Markdown, appending Markdown to existing pages, and appending a native `linked_page` block (`appflowy_append_page_link`, the GUI "Link to page" equivalent — not a Markdown hyperlink). Appending goes through AppFlowy's `append-block` endpoint, **which prepends what it receives at every level** (batched calls landed out of order; table rows and row cells flipped) — these tools work around it by sending one top-level block per call with recursively pre-reversed children. AppFlowy exposes no high-level REST endpoint for deleting or editing arbitrary existing blocks; for that, see Document Editing below. Page-level deletion through trash is supported.
+
+### Document Editing (collab-level)
+
+- `appflowy_update_document_block`
+- `appflowy_delete_document_block`
+- `appflowy_snapshot_document`
+- `appflowy_restore_document_snapshot`
+
+For editing existing content — what `append-block` cannot do. These go through AppFlowy's `collab/web-update` endpoint with a `yrs` state-vector diff: `appflowy_update_document_block` replaces the ENTIRE text of one block (inline markdown semantics, text-bearing types only), `appflowy_delete_document_block` detaches a block from its parent's children (the record stays as invisible CRDT history). Snapshots capture the full document state to a local file before risky edits; restore **detaches the current content and rebuilds the snapshot as fresh blocks** (monotone yjs delete sets mean a raw state push-back cannot revive anything — verified live; this rebuild is the strongest restore CRDT allows). All four mutate the live document — use snapshots.
 
 When saving AI answers, notes, summaries, or generated content into AppFlowy, use `appflowy_save_page` by default. Its `content_format` field defaults to `markdown`, so agents do not need to ask users to say "save as Markdown" every time. Set `content_format` to `plain_text` only when the user explicitly wants the content preserved as literal plain text.
 
@@ -340,8 +350,26 @@ For Markdown there is no server-side export format, so these tools rebuild it fr
 - `appflowy_create_row`
 - `appflowy_upsert_row`
 - `appflowy_get_updated_rows`
+- `appflowy_update_row`
+- `appflowy_delete_row`
+- `appflowy_restore_row`
 
 `appflowy_create_database_field` field types: 0=RichText, 1=Number, 2=DateTime, 3=SingleSelect, 4=MultiSelect, 5=Checkbox, 6=URL, 7=Checklist.
+
+`appflowy_update_row` rewrites cells by **field name** through the collab web-update path (all field types incl. select options and checklist operations by task name); `appflowy_delete_row`/`appflowy_restore_row` soft-delete and restore the way the web UI does (flagged in every view). `appflowy_upsert_row` derives row ids from `pre_hash` and never shows the row in views — prefer `appflowy_create_row` to create and `appflowy_update_row` to edit.
+
+### Database Row Documents
+
+- `appflowy_append_markdown_to_row`
+
+A database row's page body is a **separate** Document collab addressed by `UUIDv5(namespace=row UUID, name="document_id")` — pass `document` to `appflowy_create_row` to initialize it atomically (the response includes `document_id`); calling page append tools with a bare row id hits the wrong collab (`Document/{id} is not active`). `appflowy_append_markdown_to_row` resolves the derived document and appends there.
+
+### Database History
+
+- `appflowy_list_database_history`
+- `appflowy_get_database_restore_state`
+
+Read-only revision history of a database (versions + timestamps, with paging) and whether it currently sits on a restore point. Preview and restore jobs are not exposed yet.
 
 ### Search
 
@@ -431,6 +459,14 @@ Share a page with collaborators by email at an access level — `10` ReadOnly, `
 
 `appflowy_import_csv` creates/appends/replaces a database (grid, board or calendar) from a local CSV with dialect options (header, delimiter, quote, encoding). `appflowy_import_document` converts a local `.doc`/`.docx`/`.html`/`.pdf` file into a Document page under `parent_view_id`. Both are asynchronous server-side tasks (presigned upload, then poll the status tools).
 
+### Notion Import
+
+- `appflowy_import_notion_zip`
+- `appflowy_get_import_task`
+- `appflowy_cancel_import_task`
+
+`appflowy_import_notion_zip` imports a Notion export `.zip` under a parent page (presigned upload incl. a multipart branch for large archives). Import runs as a background server-side task — poll `appflowy_get_import_task` (it reads the account-wide task list and filters your `task_id`), or abandon with `appflowy_cancel_import_task`.
+
 ### Notifications
 
 - `appflowy_list_notifications`
@@ -454,7 +490,7 @@ The workspace notification inbox (comments, mentions, share invitations) — the
 The original Python implementation (`appflowy_mcp/` and `appflowy-cli/`) was **deprecated in v0.8.0 and has since been removed from this repository** — check out tag `v0.8.0` if you need the Python sources. The Rust binary is the only implementation going forward.
 
 - PyPI packages [`appflowy-mcp`](https://pypi.org/project/appflowy-mcp/) (final: **0.8.0**) and [`appflowy-cli`](https://pypi.org/project/appflowy-cli/) (final: **0.6.4**) remain installable but receive no further updates — the release workflow no longer publishes to PyPI.
-- The Rust implementation is behavior-compatible: it shipped with the same 81 tool names and schemas as the Python version (verified via `tools/list` diff), and has since grown to 114 — same CLI commands and output, same credential file format and location.
+- The Rust implementation is behavior-compatible: it shipped with the same 81 tool names and schemas as the Python version (verified via `tools/list` diff), and has since grown to 128 — same CLI commands and output, same credential file format and location.
 - Beyond parity, the rewrite centralizes error handling (HTTP status/code preserved to the MCP boundary), unwraps the `{code,message,data}` envelope once in the client, retries/renews auth in one race-safe place, parallelizes export prefetch and asset upload, and keeps full attempt traces on fetch failures.
 
 ## Development

@@ -2,16 +2,15 @@
 //! `meeting-api.ts` (base `/api/meeting/{workspace_id}/v2`).
 
 use std::io::ErrorKind;
-use std::path::Path;
 
 use reqwest::Method;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::{tool, tool_router, ErrorData, Json};
+use rmcp::{tool, tool_router, Json};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::server::AppServer;
-use crate::tools::util::map_tool_error;
+use crate::tools::util::{expand_tilde, map_tool_error, ToolError};
 
 #[derive(Debug, Default, Deserialize, rmcp::schemars::JsonSchema)]
 #[serde(default)]
@@ -74,17 +73,20 @@ async fn upload_audio(
     server: &AppServer,
     workspace_id: &str,
     path: &str,
-) -> Result<String, ErrorData> {
-    let file_path = Path::new(path);
-    let bytes = tokio::fs::read(file_path).await.map_err(|err| {
+) -> Result<String, ToolError> {
+    let file_path = expand_tilde(path);
+    let bytes = tokio::fs::read(&file_path).await.map_err(|err| {
         let message = if err.kind() == ErrorKind::NotFound {
-            format!("Local audio file not found: {path}")
+            format!("Local audio file not found: {}", file_path.display())
         } else {
-            format!("Cannot read local audio file ({path}): {err}")
+            format!(
+                "Cannot read local audio file ({}): {err}",
+                file_path.display()
+            )
         };
-        ErrorData::invalid_params(message, None)
+        ToolError::validation(message)
     })?;
-    let content_type = mime_guess::from_path(file_path)
+    let content_type = mime_guess::from_path(&file_path)
         .first_raw()
         .map(str::to_string)
         .unwrap_or_else(|| "application/octet-stream".to_string());
@@ -107,19 +109,13 @@ async fn upload_audio(
         .get("upload_url")
         .and_then(Value::as_str)
         .ok_or_else(|| {
-            ErrorData::internal_error(
-                "create_presigned_url response is missing `upload_url`.",
-                None,
-            )
+            ToolError::internal("create_presigned_url response is missing `upload_url`.")
         })?;
     let download_url = presigned
         .get("download_url")
         .and_then(Value::as_str)
         .ok_or_else(|| {
-            ErrorData::internal_error(
-                "create_presigned_url response is missing `download_url`.",
-                None,
-            )
+            ToolError::internal("create_presigned_url response is missing `download_url`.")
         })?;
 
     // The presigned URL carries its own authorization (per the web client's
@@ -131,9 +127,7 @@ async fn upload_audio(
         .body(bytes)
         .send()
         .await
-        .map_err(|err| {
-            ErrorData::internal_error(format!("Presigned audio upload failed: {err}"), None)
-        })?;
+        .map_err(|err| ToolError::internal(format!("Presigned audio upload failed: {err}")))?;
     let status = response.status();
     if !status.is_success() {
         let snippet: String = response
@@ -144,10 +138,9 @@ async fn upload_audio(
             .chars()
             .take(200)
             .collect();
-        return Err(ErrorData::internal_error(
-            format!("Presigned audio upload rejected with HTTP {status}: {snippet}"),
-            None,
-        ));
+        return Err(ToolError::internal(format!(
+            "Presigned audio upload rejected with HTTP {status}: {snippet}"
+        )));
     }
     Ok(download_url.to_string())
 }
@@ -161,7 +154,7 @@ impl AppServer {
     async fn appflowy_meeting_usage(
         &self,
         Parameters(request): Parameters<MeetingUsageRequest>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         let data = self
             .client
             .request(
@@ -182,22 +175,20 @@ impl AppServer {
     async fn appflowy_meeting_transcribe(
         &self,
         Parameters(request): Parameters<TranscribeAudioRequest>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         let audio_url = request.audio_url.filter(|url| !url.is_empty());
         let path = request.path.filter(|path| !path.is_empty());
         if audio_url.is_some() && path.is_some() {
-            return Err(ErrorData::invalid_params(
+            return Err(ToolError::validation(
                 "audio_url and path are mutually exclusive; provide exactly one audio source.",
-                None,
             ));
         }
         let audio_url = match (audio_url, path) {
             (Some(url), None) => url,
             (None, Some(path)) => upload_audio(self, &request.workspace_id, &path).await?,
             (None, None) => {
-                return Err(ErrorData::invalid_params(
+                return Err(ToolError::validation(
                     "An audio source is required: either audio_url or path.",
-                    None,
                 ));
             }
             (Some(_), Some(_)) => unreachable!("mutual exclusion checked above"),
@@ -234,7 +225,7 @@ impl AppServer {
     async fn appflowy_meeting_get_transcript(
         &self,
         Parameters(request): Parameters<GetTranscriptRequest>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         let data = self
             .client
             .request(
@@ -259,7 +250,7 @@ impl AppServer {
     async fn appflowy_meeting_get_paragraphs(
         &self,
         Parameters(request): Parameters<GetParagraphsRequest>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         let data = self
             .client
             .request(
@@ -284,7 +275,7 @@ impl AppServer {
     async fn appflowy_meeting_delete_transcript(
         &self,
         Parameters(request): Parameters<DeleteTranscriptRequest>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         self.client
             .request(
                 Method::DELETE,

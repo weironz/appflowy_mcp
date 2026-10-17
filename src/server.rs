@@ -67,6 +67,7 @@ impl AppServer {
             + Self::export_tool_router()
             + Self::comments_tool_router()
             + Self::sharing_tool_router()
+            + Self::docedit_tool_router()
             + Self::imports_tool_router()
             + Self::notifications_tool_router()
             + Self::meeting_tool_router()

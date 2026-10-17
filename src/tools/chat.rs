@@ -2,13 +2,13 @@
 
 use reqwest::Method;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::{tool, tool_router, ErrorData, Json};
+use rmcp::{tool, tool_router, Json};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::server::AppServer;
-use crate::tools::util::map_tool_error;
+use crate::tools::util::{map_tool_error, ToolError};
 
 /// Mirrors Python `models.py::CreateChatRequest` (workspace_id flattened in).
 #[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
@@ -66,12 +66,9 @@ impl AppServer {
     async fn appflowy_create_chat(
         &self,
         Parameters(request): Parameters<CreateChatRequest>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         if request.name.is_empty() {
-            return Err(ErrorData::invalid_params(
-                "Chat name must not be empty.",
-                None,
-            ));
+            return Err(ToolError::validation("Chat name must not be empty."));
         }
         // Python: `request.chat_id or str(uuid.uuid4())` — an empty string
         // chat_id also falls back to a generated uuid.
@@ -103,7 +100,7 @@ impl AppServer {
     async fn appflowy_delete_chat(
         &self,
         Parameters(request): Parameters<ChatIdRequest>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         self.client
             .request(
                 Method::DELETE,
@@ -123,7 +120,7 @@ impl AppServer {
     async fn appflowy_get_chat_settings(
         &self,
         Parameters(request): Parameters<ChatIdRequest>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         let data = self
             .client
             .request(
@@ -147,7 +144,7 @@ impl AppServer {
     async fn appflowy_update_chat_settings(
         &self,
         Parameters(request): Parameters<UpdateChatSettingsRequest>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         let settings_path = format!(
             "/api/chat/{}/{}/settings",
             request.workspace_id, request.chat_id
@@ -182,7 +179,7 @@ impl AppServer {
     async fn appflowy_list_chat_messages(
         &self,
         Parameters(request): Parameters<ListChatMessagesRequest>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         let mut params: Vec<(&str, String)> =
             vec![("limit", request.limit.unwrap_or(20).to_string())];
         if let Some(before_message_id) = request.before_message_id {
@@ -211,7 +208,7 @@ impl AppServer {
     async fn appflowy_chat_ask(
         &self,
         Parameters(request): Parameters<ChatAskRequest>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         // message_type is a u8 enum: 0=System, 1=User.
         let question_message = self
             .client
@@ -230,9 +227,7 @@ impl AppServer {
             .get("message_id")
             .cloned()
             .filter(|message_id| !message_id.is_null())
-            .ok_or_else(|| {
-                ErrorData::internal_error("Question response did not include message_id.", None)
-            })?;
+            .ok_or_else(|| ToolError::internal("Question response did not include message_id."))?;
         // AppFlowy message ids are integers; keep strings verbatim and render
         // anything else without quotes for the path segment.
         let question_id_segment = match &question_id {

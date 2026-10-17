@@ -3,6 +3,8 @@
 use std::path::{Path, PathBuf};
 
 use reqwest::Method;
+use rmcp::handler::server::tool::IntoCallToolResult;
+use rmcp::model::{CallToolResponse, CallToolResult, ContentBlock};
 use rmcp::ErrorData;
 use serde_json::{json, Value};
 
@@ -10,13 +12,58 @@ use crate::client::AppFlowyClient;
 use crate::error::{Error, Result};
 use crate::markdown::Block;
 
-/// Bridge crate errors onto MCP errors. Validation failures are caller bugs
-/// (invalid params); everything else keeps the full Display — which already
-/// carries the AppFlowy `code` and HTTP status — as an internal error.
-pub fn map_tool_error(e: Error) -> ErrorData {
+/// Error type for tool functions, bridging the two MCP failure modes
+/// (SEP-1303): **input validation** failures are tool *execution* errors
+/// (an `isError: true` result the model can read and self-correct), while
+/// everything else stays a JSON-RPC protocol error (`ErrorData`). The rmcp
+/// blanket `IntoCallToolResult for Result<T, E>` routes each variant.
+pub enum ToolError {
+    /// Caller-fixable bad input -> `Ok(CallToolResult::error(...))`.
+    Validation(String),
+    /// API / transport / infrastructure failure -> `Err(ErrorData)`.
+    Protocol(ErrorData),
+}
+
+impl ToolError {
+    /// Bad caller input; surfaces as an `isError: true` tool result.
+    pub fn validation(message: impl Into<String>) -> Self {
+        Self::Validation(message.into())
+    }
+
+    /// Internal failure; surfaces as JSON-RPC `-32603`. Kept for the rare
+    /// spots that construct an internal error directly instead of going
+    /// through a crate [`Error`].
+    pub fn internal(message: impl Into<String>) -> Self {
+        Self::Protocol(ErrorData::internal_error(message.into(), None))
+    }
+
+    /// Wrap an already-built [`ErrorData`] as a protocol error.
+    pub fn protocol(data: ErrorData) -> Self {
+        Self::Protocol(data)
+    }
+}
+
+impl IntoCallToolResult for ToolError {
+    fn into_call_tool_result(self) -> std::result::Result<CallToolResponse, ErrorData> {
+        match self {
+            // CallToolResult::error already sets is_error: true; the blanket
+            // Result impl would set it again anyway.
+            Self::Validation(message) => {
+                Ok(CallToolResult::error(vec![ContentBlock::text(message)]).into())
+            }
+            Self::Protocol(data) => Err(data),
+        }
+    }
+}
+
+/// Bridge crate errors onto [`ToolError`]. Validation failures are tool
+/// execution errors the caller can fix (SEP-1303); everything else keeps the
+/// full Display — which already carries the AppFlowy `code` and HTTP status —
+/// as a protocol-level internal error.
+pub fn map_tool_error(e: Error) -> ToolError {
     match e {
-        Error::Validation(message) => ErrorData::invalid_params(message, None),
-        other => ErrorData::internal_error(other.to_string(), None),
+        Error::Validation(message) => ToolError::Validation(message),
+        other => ToolError::Protocol(ErrorData::internal_error(other.to_string(), None)),
     }
 }
 
@@ -121,9 +168,32 @@ pub fn unique_path(path: &Path) -> PathBuf {
     }
 }
 
+/// Minimal port of Python `Path.expanduser()`: expands a leading `~` (bare,
+/// `~/...`, or `~\...`) against `$USERPROFILE` (Windows) or `$HOME`. The
+/// `~user/...` form is left untouched, as are paths without a leading tilde.
+pub fn expand_tilde(path: &str) -> PathBuf {
+    let Some(rest) = path.strip_prefix('~') else {
+        return PathBuf::from(path);
+    };
+    if !(rest.is_empty() || rest.starts_with('/') || rest.starts_with('\\')) {
+        return PathBuf::from(path);
+    }
+    let home_var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    let Some(home) = std::env::var_os(home_var) else {
+        return PathBuf::from(path);
+    };
+    if rest.is_empty() {
+        PathBuf::from(home)
+    } else {
+        PathBuf::from(home).join(rest.trim_start_matches(['/', '\\']))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::sync::Mutex;
 
     #[test]
     fn walks_views_preorder() {
@@ -148,11 +218,101 @@ mod tests {
     }
 
     #[test]
-    fn errors_map_to_mcp_codes() {
+    fn validation_becomes_tool_execution_error() {
+        // SEP-1303: input validation surfaces as an isError tool result, not
+        // a JSON-RPC protocol error, so the model can read it and retry.
         let err = map_tool_error(Error::Validation("bad".into()));
-        assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+        let CallToolResponse::Complete(result) = err.into_call_tool_result().expect("tool result")
+        else {
+            panic!("expected a complete call-tool result");
+        };
+        assert_eq!(result.is_error, Some(true));
+        assert_eq!(result.content.len(), 1);
+        assert!(matches!(
+            &result.content[0],
+            rmcp::model::ContentBlock::Text(t) if t.text == "bad"
+        ));
+    }
+
+    #[test]
+    fn non_validation_stays_protocol_error() {
+        // API/transport/etc. keep the full message (AppFlowy code + HTTP
+        // status) as a JSON-RPC -32603 protocol error.
         let err = map_tool_error(Error::api("boom", Some(500), None));
-        assert_eq!(err.code, rmcp::model::ErrorCode::INTERNAL_ERROR);
-        assert!(err.message.contains("boom"));
+        let data = err.into_call_tool_result().expect_err("protocol error");
+        assert_eq!(data.code, rmcp::model::ErrorCode::INTERNAL_ERROR);
+        assert!(data.message.contains("boom"));
+        assert!(data.message.contains("500"));
+    }
+
+    #[test]
+    fn direct_validation_constructor_matches() {
+        let data = ToolError::internal("kaput");
+        assert!(data.into_call_tool_result().is_err());
+        let err = ToolError::validation("nope");
+        let CallToolResponse::Complete(result) = err.into_call_tool_result().expect("tool result")
+        else {
+            panic!("expected a complete call-tool result");
+        };
+        assert_eq!(result.is_error, Some(true));
+    }
+
+    // These tests mutate process-wide env vars; serialize them with a lock
+    // and always restore the original value.
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: Mutex<()> = Mutex::new(());
+        &LOCK
+    }
+
+    struct EnvGuard(&'static str, Option<std::ffi::OsString>);
+
+    impl EnvGuard {
+        fn set(var: &'static str, value: Option<&str>) -> Self {
+            let guard = Self(var, std::env::var_os(var));
+            match value {
+                Some(value) => std::env::set_var(var, value),
+                None => std::env::remove_var(var),
+            }
+            guard
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.1 {
+                Some(value) => std::env::set_var(self.0, value),
+                None => std::env::remove_var(self.0),
+            }
+        }
+    }
+
+    fn home_var() -> &'static str {
+        if cfg!(windows) {
+            "USERPROFILE"
+        } else {
+            "HOME"
+        }
+    }
+
+    #[test]
+    fn expand_tilde_passes_through_non_tilde_paths() {
+        assert_eq!(expand_tilde("docs/a.md"), PathBuf::from("docs/a.md"));
+        assert_eq!(expand_tilde("~user/a.md"), PathBuf::from("~user/a.md"));
+    }
+
+    #[test]
+    fn expand_tilde_expands_against_home() {
+        let _lock = env_lock().lock().unwrap();
+        let _guard = EnvGuard::set(home_var(), Some("/fake/home"));
+        assert_eq!(expand_tilde("~"), PathBuf::from("/fake/home"));
+        assert_eq!(expand_tilde("~/a.md"), PathBuf::from("/fake/home/a.md"));
+        assert_eq!(expand_tilde("~\\a.md"), PathBuf::from("/fake/home/a.md"));
+    }
+
+    #[test]
+    fn expand_tilde_without_home_var_passes_through() {
+        let _lock = env_lock().lock().unwrap();
+        let _guard = EnvGuard::set(home_var(), None);
+        assert_eq!(expand_tilde("~/a.md"), PathBuf::from("~/a.md"));
     }
 }

@@ -103,7 +103,11 @@ async fn post_retried_on_429() {
     let client = make_client(&server).await;
     let pending = tokio::spawn({
         let client = client.clone();
-        async move { client.request(Method::POST, "/x", None, Some(json!({}))).await }
+        async move {
+            client
+                .request(Method::POST, "/x", None, Some(json!({})))
+                .await
+        }
     });
     wait_hits(&rate, 1).await;
     rate.delete_async().await;
@@ -127,7 +131,9 @@ async fn status_401_triggers_reauth_and_retry() {
     let server = MockServer::start_async().await;
     let expired = server
         .mock_async(|when, then| {
-            when.method(GET).path("/x").header("Authorization", "Bearer t");
+            when.method(GET)
+                .path("/x")
+                .header("Authorization", "Bearer t");
             then.status(401).json_body(json!({"message": "expired"}));
         })
         .await;
@@ -169,12 +175,16 @@ async fn error_preserves_status_and_code() {
     server
         .mock_async(|when, then| {
             when.method(GET).path("/x");
-            then.status(400).json_body(json!({"message": "bad", "code": 1026}));
+            then.status(400)
+                .json_body(json!({"message": "bad", "code": 1026}));
         })
         .await;
     let client = make_client(&server).await;
 
-    let err = client.request(Method::GET, "/x", None, None).await.unwrap_err();
+    let err = client
+        .request(Method::GET, "/x", None, None)
+        .await
+        .unwrap_err();
     match err {
         Error::Api { status, code, .. } => {
             assert_eq!(status, Some(400));
@@ -190,12 +200,16 @@ async fn business_error_200_envelope() {
     server
         .mock_async(|when, then| {
             when.method(GET).path("/x");
-            then.status(200).json_body(json!({"code": 1026, "message": "limit"}));
+            then.status(200)
+                .json_body(json!({"code": 1026, "message": "limit"}));
         })
         .await;
     let client = make_client(&server).await;
 
-    let err = client.request(Method::GET, "/x", None, None).await.unwrap_err();
+    let err = client
+        .request(Method::GET, "/x", None, None)
+        .await
+        .unwrap_err();
     match err {
         Error::Api { status, code, .. } => {
             assert_eq!(status, Some(200));

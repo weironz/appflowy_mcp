@@ -3,8 +3,8 @@
 //! Python dict expectations.
 
 use appflowy_mcp::markdown::{
-    parse_content_to_blocks, parse_markdown_to_blocks, parse_plain_text_to_blocks,
-    parse_rich_text, Block,
+    parse_content_to_blocks, parse_markdown_to_blocks, parse_plain_text_to_blocks, parse_rich_text,
+    Block,
 };
 use serde_json::{json, Value};
 
@@ -35,7 +35,9 @@ fn test_blank_lines_are_not_emitted_as_blocks() {
             Some(d) if !d.is_empty() => {
                 for op in d {
                     assert!(
-                        op.get("insert").and_then(Value::as_str).is_some_and(|s| !s.is_empty()),
+                        op.get("insert")
+                            .and_then(Value::as_str)
+                            .is_some_and(|s| !s.is_empty()),
                         "empty insert in {block:?}"
                     );
                 }
@@ -216,7 +218,8 @@ fn test_inline_images_split_paragraphs_and_resolver() {
     );
 
     let mut resolve = |url: &str, _caption: &str| format!("cdn:{url}");
-    let resolved = parse_markdown_to_blocks("![cap](https://img.example/a.png)\n", Some(&mut resolve));
+    let resolved =
+        parse_markdown_to_blocks("![cap](https://img.example/a.png)\n", Some(&mut resolve));
     assert_eq!(
         to_json(resolved),
         json!([{"type": "image", "data": {"url": "cdn:https://img.example/a.png", "caption": "cap"}}])
@@ -375,4 +378,149 @@ fn test_table_alignment_separators_and_padding() {
         short_row.children[2].children[0].data["delta"],
         json!([{"insert": ""}])
     );
+}
+
+// ---------------------------------------------------------------------------
+// Inline tokenizer: nested formatting, backslash escapes, and round-trips.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_nested_inline_containers() {
+    // Bold containing a link: `**[t](u)**` merges the container and inner
+    // marks onto one op (old single-regex behavior parsed this as bold
+    // literal text "[t](u)").
+    assert_eq!(
+        serde_json::to_value(parse_rich_text("**[t](https://x.example)**")).unwrap(),
+        json!([{"insert": "t", "attributes": {"bold": true, "href": "https://x.example"}}])
+    );
+    // Link containing bold (the export-side wrapping order): same op.
+    assert_eq!(
+        serde_json::to_value(parse_rich_text("[**t**](https://x.example)")).unwrap(),
+        json!([{"insert": "t", "attributes": {"bold": true, "href": "https://x.example"}}])
+    );
+    // Bold containing italic.
+    assert_eq!(
+        serde_json::to_value(parse_rich_text("**a *b* c**")).unwrap(),
+        json!([
+            {"insert": "a ", "attributes": {"bold": true}},
+            {"insert": "b", "attributes": {"bold": true, "italic": true}},
+            {"insert": " c", "attributes": {"bold": true}},
+        ])
+    );
+    // Bold containing strikethrough.
+    assert_eq!(
+        serde_json::to_value(parse_rich_text("**~~s~~**")).unwrap(),
+        json!([{"insert": "s", "attributes": {"bold": true, "strikethrough": true}}])
+    );
+    // A mismatched inner marker inside a container stays literal.
+    assert_eq!(
+        serde_json::to_value(parse_rich_text("**a *b**")).unwrap(),
+        json!([{"insert": "a *b", "attributes": {"bold": true}}])
+    );
+}
+
+#[test]
+fn test_repeated_italic_markers_pair_nearest_first() {
+    // Documented rule ("先开先闭"): same-kind markers pair with the nearest
+    // following closer rather than nesting, so `*bold *inner* tail*` is two
+    // italic runs with plain text between, matching CommonMark only in
+    // spirit — see the tokenizer comment in src/markdown.rs.
+    assert_eq!(
+        serde_json::to_value(parse_rich_text("*bold *inner* tail*")).unwrap(),
+        json!([
+            {"insert": "bold ", "attributes": {"italic": true}},
+            {"insert": "inner"},
+            {"insert": " tail", "attributes": {"italic": true}},
+        ])
+    );
+}
+
+#[test]
+fn test_backslash_escapes_parse_as_literal() {
+    assert_eq!(
+        serde_json::to_value(parse_rich_text("\\*not italic\\*")).unwrap(),
+        json!([{"insert": "*not italic*"}])
+    );
+    assert_eq!(
+        serde_json::to_value(parse_rich_text("\\[a\\] and \\\\ and \\`b\\`")).unwrap(),
+        json!([{"insert": "[a] and \\ and `b`"}])
+    );
+    // Unrecognized escapes keep the backslash, and escapes are honored
+    // inside container contents too.
+    assert_eq!(
+        serde_json::to_value(parse_rich_text("\\q **a \\* b**")).unwrap(),
+        json!([
+            {"insert": "\\q "},
+            {"insert": "a * b", "attributes": {"bold": true}},
+        ])
+    );
+}
+
+#[test]
+fn test_unclosed_markers_stay_literal() {
+    for literal in ["**x", "*x", "~~x", "`x", "[x](", "[x]", "[x]()", "****"] {
+        assert_eq!(
+            serde_json::to_value(parse_rich_text(literal)).unwrap(),
+            json!([{"insert": literal}]),
+            "{literal:?} should stay literal"
+        );
+    }
+    // Markers after a valid pair are literal too.
+    assert_eq!(
+        serde_json::to_value(parse_rich_text("**x** ok **y")).unwrap(),
+        json!([
+            {"insert": "x", "attributes": {"bold": true}},
+            {"insert": " ok **y"},
+        ])
+    );
+}
+
+#[test]
+fn test_code_span_content_is_verbatim() {
+    // Nothing parses inside a code span: no marks, no escapes `.
+    assert_eq!(
+        serde_json::to_value(parse_rich_text("pre `**x** \\*y*` post")).unwrap(),
+        json!([
+            {"insert": "pre "},
+            {"insert": "**x** \\*y*", "attributes": {"code": true}},
+            {"insert": " post"},
+        ])
+    );
+}
+
+#[test]
+fn test_roundtrip_plain_special_chars() {
+    use appflowy_mcp::delta::DeltaOp;
+    use appflowy_mcp::render::delta_to_markdown;
+    let delta = vec![DeltaOp::plain("a*b [c] `d` \\e")];
+    let md = delta_to_markdown(&delta);
+    assert_eq!(md, "a\\*b \\[c\\] \\`d\\` \\\\e");
+    assert_eq!(parse_rich_text(&md), delta);
+}
+
+#[test]
+fn test_roundtrip_nested_attributes() {
+    use appflowy_mcp::delta::DeltaOp;
+    use appflowy_mcp::render::delta_to_markdown;
+    let attrs = |pairs: &[(&str, Value)]| {
+        serde_json::Map::from_iter(pairs.iter().map(|(k, v)| (k.to_string(), v.clone())))
+    };
+    // bold + href
+    let delta = vec![DeltaOp::with_attributes(
+        "t",
+        attrs(&[("bold", json!(true)), ("href", json!("https://u.example"))]),
+    )];
+    assert_eq!(parse_rich_text(&delta_to_markdown(&delta)), delta);
+    // bold + strikethrough
+    let delta = vec![DeltaOp::with_attributes(
+        "x",
+        attrs(&[("bold", json!(true)), ("strikethrough", json!(true))]),
+    )];
+    assert_eq!(parse_rich_text(&delta_to_markdown(&delta)), delta);
+    // code + bold
+    let delta = vec![DeltaOp::with_attributes(
+        "a*b",
+        attrs(&[("code", json!(true)), ("bold", json!(true))]),
+    )];
+    assert_eq!(parse_rich_text(&delta_to_markdown(&delta)), delta);
 }

@@ -6,6 +6,7 @@ pub mod chat;
 pub mod comments;
 pub mod content;
 pub mod database;
+pub mod docedit;
 pub mod export;
 pub mod imports;
 pub mod meeting;

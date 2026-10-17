@@ -13,12 +13,10 @@
 //! segments — names or UUIDs — resolved level by level, e.g. `demo/notes`.
 //!
 //! Port of Python `appflowy_mcp/cli.py`. Known intentional downgrades:
-//! - no `rpassword` dependency: the login password prompt reads a plain
-//!   stdin line without disabling terminal echo (Python used `getpass`);
 //! - `py_repr` approximates Python's `repr()` for the common cases instead
 //!   of being a full port.
 
-use std::io::Write as _;
+use std::io::{IsTerminal, Write as _};
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
@@ -35,9 +33,10 @@ use crate::importer::MarkdownImporter;
 use crate::markdown::parse_content_to_blocks;
 use crate::server::AppServer;
 use crate::tools::export::{
-    export_views_to_directory, fetch_page_markdown, DEFAULT_PAGE_BACKOFF_SECS, DEFAULT_PAGE_RETRIES,
+    export_views_to_directory, fetch_page_markdown, ExportManifest, DEFAULT_PAGE_BACKOFF_SECS,
+    DEFAULT_PAGE_RETRIES, MANIFEST_FILE_NAME,
 };
-use crate::tools::util::{create_page_with_blocks, unique_path};
+use crate::tools::util::{create_page_with_blocks, expand_tilde, unique_path};
 use crate::update::UpdateArgs;
 
 // ==================== argument parsing ====================
@@ -180,33 +179,6 @@ struct Credentials {
     access_token: Option<String>,
     #[serde(default)]
     refresh_token: Option<String>,
-}
-
-fn home_dir() -> Option<PathBuf> {
-    #[cfg(windows)]
-    {
-        std::env::var_os("USERPROFILE").map(PathBuf::from)
-    }
-    #[cfg(not(windows))]
-    {
-        std::env::var_os("HOME").map(PathBuf::from)
-    }
-}
-
-/// `Path(raw).expanduser()`: expand a leading `~` via `USERPROFILE` on
-/// Windows, `HOME` otherwise.
-fn expand_tilde(raw: &str) -> PathBuf {
-    if raw == "~" {
-        if let Some(home) = home_dir() {
-            return home;
-        }
-    }
-    if let Some(rest) = raw.strip_prefix("~/").or_else(|| raw.strip_prefix("~\\")) {
-        if let Some(home) = home_dir() {
-            return home.join(rest);
-        }
-    }
-    PathBuf::from(raw)
 }
 
 fn config_dir() -> PathBuf {
@@ -465,6 +437,17 @@ fn str_field_or<'a>(value: &'a Value, key: &str, default: &'a str) -> &'a str {
     value.get(key).and_then(Value::as_str).unwrap_or(default)
 }
 
+/// Non-empty export destinations are rejected unless the directory already
+/// holds a usable export manifest for this workspace — that marks it as a
+/// previous incremental-export destination, so re-exporting (incrementally)
+/// there is allowed, mirroring the MCP tools' rule.
+fn manifest_usable(directory: &std::path::Path, workspace_id: &str) -> bool {
+    std::fs::read_to_string(directory.join(MANIFEST_FILE_NAME))
+        .ok()
+        .and_then(|text| serde_json::from_str::<ExportManifest>(&text).ok())
+        .is_some_and(|manifest| manifest.is_usable_for(workspace_id))
+}
+
 /// Python truthiness for a JSON value.
 fn truthy(value: Option<&Value>) -> bool {
     match value {
@@ -540,8 +523,9 @@ fn py_repr(s: &str) -> String {
 
 /// Read one line from stdin after writing `prompt` (stdout for the email,
 /// stderr for the password, matching Python `input`/`getpass` stream
-/// choices). Unlike `getpass`, the password echo is NOT disabled — no
-/// terminal-raw-mode dependency is available to this crate.
+/// choices). For the interactive password prompt this is only the fallback
+/// used when stdin is not a TTY — the TTY path goes through
+/// `rpassword::prompt_password`, which disables terminal echo.
 fn prompt_line(prompt: &str, stderr: bool) -> Result<String> {
     if stderr {
         eprint!("{prompt}");
@@ -570,6 +554,14 @@ async fn cmd_login(client: &AppFlowyClient, args: &LoginArgs) -> Result<()> {
     };
     let password = match args.password.clone().filter(|p| !p.is_empty()) {
         Some(password) => password,
+        // Two-track prompt: rpassword disables terminal echo but reads
+        // directly from the TTY, which would block or fail when the password
+        // is piped through stdin (scripts), so piped stdin keeps the plain
+        // read_line fallback.
+        None if std::io::stdin().is_terminal() => {
+            rpassword::prompt_password_stderr("Password: ")
+                .map_err(|err| Error::Other(format!("reading password: {err}")))?
+        }
         None => prompt_line("Password: ", true)?,
     };
     if let Some(base_url) = args.base_url.as_deref().filter(|u| !u.is_empty()) {
@@ -765,7 +757,7 @@ async fn cmd_export(
         let directory = expand_tilde(output);
         if directory.exists() {
             let mut entries = std::fs::read_dir(&directory)?;
-            if entries.next().is_some() {
+            if entries.next().is_some() && !manifest_usable(&directory, workspace_id) {
                 return Err(Error::Other(format!(
                     "Destination directory is not empty: {}",
                     directory.display()

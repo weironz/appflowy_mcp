@@ -4,13 +4,13 @@ use std::collections::HashMap;
 
 use reqwest::Method;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::{tool, tool_router, ErrorData, Json};
+use rmcp::{tool, tool_router, Json};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::server::AppServer;
 use crate::tools::export::fetch_collab_markdown;
-use crate::tools::util::{ensure_parent_is_not_workspace, map_tool_error};
+use crate::tools::util::{ensure_parent_is_not_workspace, map_tool_error, ToolError};
 
 const SORT_BY_FIELDS: [&str; 3] = ["name", "created_at", "last_edited_time"];
 
@@ -215,14 +215,13 @@ impl AppServer {
     async fn appflowy_create_page(
         &self,
         Parameters(p): Parameters<CreatePageParams>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         ensure_parent_is_not_workspace(&p.workspace_id, &p.parent_view_id)
             .map_err(map_tool_error)?;
         if let Some(layout) = p.layout {
             if !(0..=4).contains(&layout) {
-                return Err(ErrorData::invalid_params(
+                return Err(ToolError::validation(
                     "layout must be between 0 and 4 (Field ge=0, le=4)",
-                    None,
                 ));
             }
         }
@@ -252,7 +251,7 @@ impl AppServer {
     async fn appflowy_get_page(
         &self,
         Parameters(p): Parameters<GetPageParams>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         self.client
             .request(
                 Method::GET,
@@ -272,7 +271,7 @@ impl AppServer {
     async fn appflowy_get_collab(
         &self,
         Parameters(p): Parameters<GetCollabParams>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         let (markdown, _attempts) = fetch_collab_markdown(
             &self.client,
             &p.workspace_id,
@@ -284,9 +283,8 @@ impl AppServer {
             Some(markdown) => Ok(Json(
                 json!({ "object_id": p.page_id, "markdown": markdown }),
             )),
-            None => Err(ErrorData::internal_error(
+            None => Err(ToolError::internal(
                 "Could not fetch collab content for this object (no document collab).",
-                None,
             )),
         }
     }
@@ -298,7 +296,7 @@ impl AppServer {
     async fn appflowy_update_page(
         &self,
         Parameters(p): Parameters<UpdatePageParams>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         self.client
             .request(
                 Method::PATCH,
@@ -323,7 +321,7 @@ impl AppServer {
     async fn appflowy_move_page(
         &self,
         Parameters(p): Parameters<MovePageParams>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         ensure_parent_is_not_workspace(&p.workspace_id, &p.new_parent_view_id)
             .map_err(map_tool_error)?;
         self.client
@@ -351,24 +349,20 @@ impl AppServer {
     async fn appflowy_reorder_pages(
         &self,
         Parameters(p): Parameters<ReorderPagesParams>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         ensure_parent_is_not_workspace(&p.workspace_id, &p.parent_view_id)
             .map_err(map_tool_error)?;
         if p.page_ids.is_none() == p.sort_by.is_none() {
-            return Err(ErrorData::invalid_params(
+            return Err(ToolError::validation(
                 "Provide exactly one of page_ids or sort_by.",
-                None,
             ));
         }
         if let Some(sort_by) = &p.sort_by {
             if !SORT_BY_FIELDS.contains(&sort_by.as_str()) {
-                return Err(ErrorData::invalid_params(
-                    format!(
-                        "sort_by must be one of {:?}",
-                        SORT_BY_FIELDS.map(str::to_owned)
-                    ),
-                    None,
-                ));
+                return Err(ToolError::validation(format!(
+                    "sort_by must be one of {:?}",
+                    SORT_BY_FIELDS.map(str::to_owned)
+                )));
             }
         }
 
@@ -430,10 +424,10 @@ impl AppServer {
                         .map(|pid| format!("'{pid}'"))
                         .collect::<Vec<_>>()
                         .join(", ");
-                    return Err(ErrorData::invalid_params(
-                        format!("Not direct children of {}: [{rendered}]", p.parent_view_id),
-                        None,
-                    ));
+                    return Err(ToolError::validation(format!(
+                        "Not direct children of {}: [{rendered}]",
+                        p.parent_view_id
+                    )));
                 }
                 let mut target = page_ids.clone();
                 target.extend(current.iter().filter(|id| !page_ids.contains(id)).cloned());
@@ -572,7 +566,7 @@ impl AppServer {
     async fn appflowy_move_page_to_trash(
         &self,
         Parameters(p): Parameters<PageRefParams>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         self.client
             .request(
                 Method::POST,
@@ -595,7 +589,7 @@ impl AppServer {
     async fn appflowy_restore_page_from_trash(
         &self,
         Parameters(p): Parameters<PageRefParams>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         self.client
             .request(
                 Method::POST,
@@ -618,7 +612,7 @@ impl AppServer {
     async fn appflowy_delete_page_from_trash(
         &self,
         Parameters(p): Parameters<PageRefParams>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         self.client
             .request(
                 Method::DELETE,
@@ -638,7 +632,7 @@ impl AppServer {
     async fn appflowy_favorite_page(
         &self,
         Parameters(p): Parameters<FavoritePageParams>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         self.client
             .request(
                 Method::POST,
@@ -664,7 +658,7 @@ impl AppServer {
     async fn appflowy_reorder_favorite(
         &self,
         Parameters(p): Parameters<ReorderFavoriteParams>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         self.client
             .request(
                 Method::POST,
@@ -689,7 +683,7 @@ impl AppServer {
     async fn appflowy_list_trash(
         &self,
         Parameters(p): Parameters<WorkspaceUnitsParams>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         self.client
             .request(
                 Method::GET,
@@ -709,7 +703,7 @@ impl AppServer {
     async fn appflowy_list_favorites(
         &self,
         Parameters(p): Parameters<WorkspaceUnitsParams>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         self.client
             .request(
                 Method::GET,
@@ -729,7 +723,7 @@ impl AppServer {
     async fn appflowy_duplicate_page(
         &self,
         Parameters(p): Parameters<DuplicatePageParams>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         // DuplicatePageRequest only carries an optional name `suffix` — the
         // endpoint duplicates in place under the same parent, so there is no
         // caller-supplied parent to guard with ensure_parent_is_not_workspace.
@@ -755,7 +749,7 @@ impl AppServer {
     async fn appflowy_list_recent(
         &self,
         Parameters(p): Parameters<WorkspaceUnitsParams>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         self.client
             .request(
                 Method::GET,
@@ -775,7 +769,7 @@ impl AppServer {
     async fn appflowy_restore_all_from_trash(
         &self,
         Parameters(p): Parameters<WorkspaceUnitsParams>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         self.client
             .request(
                 Method::POST,
@@ -798,7 +792,7 @@ impl AppServer {
     async fn appflowy_empty_trash(
         &self,
         Parameters(p): Parameters<WorkspaceUnitsParams>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         self.client
             .request(
                 Method::POST,

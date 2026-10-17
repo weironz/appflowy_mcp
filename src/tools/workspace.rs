@@ -2,12 +2,12 @@
 
 use reqwest::Method;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::{tool, tool_router, ErrorData, Json};
+use rmcp::{tool, tool_router, Json};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::server::AppServer;
-use crate::tools::util::{map_tool_error, walk_views};
+use crate::tools::util::{map_tool_error, walk_views, ToolError};
 
 /// Python truthiness for `view.get("is_space")`: bools and numbers test as
 /// themselves, empty strings / null / missing are false, anything else true.
@@ -34,11 +34,10 @@ fn default_depth() -> i64 {
 }
 
 /// pydantic `Field(0, ge=0, le=1)` equivalent, checked before any network I/O.
-fn validate_space_permission(space_permission: i64) -> Result<(), ErrorData> {
+fn validate_space_permission(space_permission: i64) -> Result<(), ToolError> {
     if !(0..=1).contains(&space_permission) {
-        return Err(ErrorData::invalid_params(
+        return Err(ToolError::validation(
             "space_permission must be between 0 and 1.",
-            None,
         ));
     }
     Ok(())
@@ -116,7 +115,7 @@ impl AppServer {
         name = "appflowy_list_workspaces",
         description = "List all workspaces for the authenticated user."
     )]
-    async fn appflowy_list_workspaces(&self) -> Result<Json<Value>, ErrorData> {
+    async fn appflowy_list_workspaces(&self) -> Result<Json<Value>, ToolError> {
         // Python: `client._request("GET", "/api/workspace").get("data", [])`.
         // The client unwraps a success envelope's top-level `data` key, so
         // `Null` here is the no-data case and keeps the empty-array semantics.
@@ -139,7 +138,7 @@ impl AppServer {
     async fn appflowy_get_workspace_folder(
         &self,
         Parameters(params): Parameters<GetWorkspaceFolderParams>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         let mut query: Vec<(&str, String)> = Vec::new();
         if let Some(depth) = params.depth {
             query.push(("depth", depth.to_string()));
@@ -168,7 +167,7 @@ impl AppServer {
     async fn appflowy_list_spaces(
         &self,
         Parameters(params): Parameters<ListSpacesParams>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         let root = self
             .client
             .request(
@@ -194,10 +193,10 @@ impl AppServer {
     async fn appflowy_create_space(
         &self,
         Parameters(request): Parameters<CreateSpaceRequest>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         let name = request
             .name
-            .ok_or_else(|| ErrorData::invalid_params("name is required.", None))?;
+            .ok_or_else(|| ToolError::validation("name is required."))?;
         validate_space_permission(request.space_permission)?;
         let data = self
             .client
@@ -227,10 +226,10 @@ impl AppServer {
     async fn appflowy_update_space(
         &self,
         Parameters(request): Parameters<UpdateSpaceRequest>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         let name = request
             .name
-            .ok_or_else(|| ErrorData::invalid_params("name is required.", None))?;
+            .ok_or_else(|| ToolError::validation("name is required."))?;
         validate_space_permission(request.space_permission)?;
         let data = self
             .client

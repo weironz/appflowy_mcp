@@ -2,12 +2,12 @@
 
 use reqwest::Method;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::{tool, tool_router, ErrorData, Json};
+use rmcp::{tool, tool_router, Json};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::server::AppServer;
-use crate::tools::util::map_tool_error;
+use crate::tools::util::{map_tool_error, ToolError};
 
 /// Mirrors AppFlowy-Web `notification-api.ts::getNotifications` query.
 #[derive(Debug, Default, Deserialize, rmcp::schemars::JsonSchema)]
@@ -36,11 +36,10 @@ pub struct NotificationIdsRequest {
     pub ids: Vec<String>,
 }
 
-fn require_ids(request: &NotificationIdsRequest) -> Result<(), ErrorData> {
+fn require_ids(request: &NotificationIdsRequest) -> Result<(), ToolError> {
     if request.ids.is_empty() {
-        return Err(ErrorData::invalid_params(
+        return Err(ToolError::validation(
             "ids must be a non-empty list of notification IDs",
-            None,
         ));
     }
     Ok(())
@@ -55,7 +54,7 @@ impl AppServer {
     async fn appflowy_list_notifications(
         &self,
         Parameters(request): Parameters<ListNotificationsRequest>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         // The web client only sends unread_only/archived when they are true.
         let mut params: Vec<(&str, String)> = Vec::new();
         if request.unread_only == Some(true) {
@@ -95,7 +94,7 @@ impl AppServer {
     async fn appflowy_get_unread_count(
         &self,
         Parameters(request): Parameters<WorkspaceNotificationsRequest>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         let data = self
             .client
             .request(
@@ -119,7 +118,7 @@ impl AppServer {
     async fn appflowy_mark_notifications_read(
         &self,
         Parameters(request): Parameters<NotificationIdsRequest>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         require_ids(&request)?;
         self.client
             .request(
@@ -140,7 +139,7 @@ impl AppServer {
     async fn appflowy_mark_all_notifications_read(
         &self,
         Parameters(request): Parameters<WorkspaceNotificationsRequest>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         self.client
             .request(
                 Method::POST,
@@ -163,7 +162,7 @@ impl AppServer {
     async fn appflowy_archive_notifications(
         &self,
         Parameters(request): Parameters<NotificationIdsRequest>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         require_ids(&request)?;
         self.client
             .request(
@@ -187,7 +186,7 @@ impl AppServer {
     async fn appflowy_archive_all_notifications(
         &self,
         Parameters(request): Parameters<WorkspaceNotificationsRequest>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         self.client
             .request(
                 Method::POST,

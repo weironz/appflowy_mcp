@@ -157,4 +157,4 @@ Notes: with env credentials the run is fully stateless (nothing written to disk)
 
 - Install / uninstall / one-line scripts: [installation.md](installation.md)
 - Connecting MCP clients (Codex/Claude/Cursor): [mcp-connect.md](mcp-connect.md)
-- The full 114-tool catalog: [README.md](../README.md) at the repository root
+- The full 128-tool catalog: [README.md](../README.md) at the repository root

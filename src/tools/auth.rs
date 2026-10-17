@@ -1,12 +1,12 @@
 //! Authentication tools (`appflowy_login`, `appflowy_refresh_token`).
 
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::{tool, tool_router, ErrorData, Json};
+use rmcp::{tool, tool_router, Json};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::server::AppServer;
-use crate::tools::util::map_tool_error;
+use crate::tools::util::{map_tool_error, ToolError};
 
 /// Mirrors Python `models.py::LoginRequest`.
 #[derive(Debug, Default, Deserialize, rmcp::schemars::JsonSchema)]
@@ -35,7 +35,7 @@ impl AppServer {
     async fn appflowy_login(
         &self,
         Parameters(request): Parameters<LoginRequest>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         if let Some(email) = request.email {
             self.client.set_email(Some(email)).await;
         }
@@ -43,10 +43,7 @@ impl AppServer {
             self.client.set_password(Some(password)).await;
         }
         if self.client.email().await.is_none() || self.client.password().await.is_none() {
-            return Err(ErrorData::invalid_params(
-                "Email and password must be provided either in the request or via APPFLOWY_EMAIL and APPFLOWY_PASSWORD env vars",
-                None,
-            ));
+            return Err(ToolError::validation("Email and password must be provided either in the request or via APPFLOWY_EMAIL and APPFLOWY_PASSWORD env vars"));
         }
         self.client.login().await.map_err(map_tool_error)?;
         Ok(Json(json!({ "status": "authenticated" })))
@@ -59,7 +56,7 @@ impl AppServer {
     async fn appflowy_refresh_token(
         &self,
         Parameters(request): Parameters<RefreshTokenRequest>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         if let Some(token) = request.refresh_token {
             self.client.set_refresh_token(Some(token)).await;
         }

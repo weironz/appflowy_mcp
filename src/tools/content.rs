@@ -13,26 +13,24 @@ use serde_json::{json, Value};
 use crate::importer::MarkdownImporter;
 use crate::markdown::{parse_content_to_blocks, parse_markdown_to_blocks};
 use crate::server::AppServer;
-use crate::tools::util::{create_page_with_blocks, ensure_parent_is_not_workspace, map_tool_error};
+use crate::tools::util::{
+    create_page_with_blocks, ensure_parent_is_not_workspace, map_tool_error, ToolError,
+};
 
 /// Python `Field(..., min_length=1)` on strings, checked after trimming.
-fn require_non_empty(value: &str, field: &str) -> Result<(), ErrorData> {
+fn require_non_empty(value: &str, field: &str) -> Result<(), ToolError> {
     if value.trim().is_empty() {
-        return Err(ErrorData::invalid_params(
-            format!("{field} must not be empty"),
-            None,
-        ));
+        return Err(ToolError::validation(format!("{field} must not be empty")));
     }
     Ok(())
 }
 
 /// Python `Field(0, ge=0, le=4)` on layout.
-fn validate_layout(layout: i64) -> Result<(), ErrorData> {
+fn validate_layout(layout: i64) -> Result<(), ToolError> {
     if !(0..=4).contains(&layout) {
-        return Err(ErrorData::invalid_params(
-            format!("layout must be between 0 and 4, got {layout}"),
-            None,
-        ));
+        return Err(ToolError::validation(format!(
+            "layout must be between 0 and 4, got {layout}"
+        )));
     }
     Ok(())
 }
@@ -196,7 +194,7 @@ impl AppServer {
         workspace_id: &str,
         page_id: &str,
         blocks: Vec<Value>,
-    ) -> Result<(Value, usize), ErrorData> {
+    ) -> Result<(Value, usize), ToolError> {
         fn server_order(mut block: Value) -> Value {
             if let Some(children) = block.get_mut("children").and_then(Value::as_array_mut) {
                 *children = children.drain(..).rev().map(server_order).collect();
@@ -217,16 +215,18 @@ impl AppServer {
                     Some(json!({ "blocks": [block] })),
                 )
                 .await
-                .map_err(|err| {
-                    let err = map_tool_error(err);
-                    ErrorData::new(
-                        err.code,
+                .map_err(|err| match map_tool_error(err) {
+                    ToolError::Validation(message) => ToolError::validation(format!(
+                        "append-block aborted after {index}/{total} block(s) sent: {message}"
+                    )),
+                    ToolError::Protocol(data) => ToolError::protocol(ErrorData::new(
+                        data.code,
                         format!(
                             "append-block aborted after {index}/{total} block(s) sent: {}",
-                            err.message
+                            data.message
                         ),
-                        err.data,
-                    )
+                        data.data,
+                    )),
                 })?;
         }
         Ok((last_response, total))
@@ -239,9 +239,9 @@ impl AppServer {
     async fn appflowy_append_blocks_to_page(
         &self,
         Parameters(request): Parameters<AppendBlocksRequest>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         if request.blocks.is_empty() {
-            return Err(ErrorData::invalid_params("blocks must not be empty", None));
+            return Err(ToolError::validation("blocks must not be empty"));
         }
         let (data, calls) = self
             .append_blocks_ordered(&request.workspace_id, &request.page_id, request.blocks)
@@ -256,9 +256,9 @@ impl AppServer {
     async fn appflowy_append_text_to_page(
         &self,
         Parameters(request): Parameters<AppendTextRequest>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         if request.texts.is_empty() {
-            return Err(ErrorData::invalid_params("texts must not be empty", None));
+            return Err(ToolError::validation("texts must not be empty"));
         }
         require_non_empty(&request.block_type, "block_type")?;
         let blocks: Vec<Value> = request
@@ -284,7 +284,7 @@ impl AppServer {
     async fn appflowy_create_markdown_page(
         &self,
         Parameters(request): Parameters<CreateMarkdownPageRequest>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         require_non_empty(&request.title, "title")?;
         require_non_empty(&request.content, "content")?;
         validate_layout(request.layout)?;
@@ -312,7 +312,7 @@ impl AppServer {
     async fn appflowy_append_markdown_to_page(
         &self,
         Parameters(request): Parameters<AppendMarkdownRequest>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         require_non_empty(&request.content, "content")?;
         let blocks = parse_markdown_to_blocks(&request.content, None);
         let block_count = blocks.len();
@@ -320,7 +320,7 @@ impl AppServer {
             .into_iter()
             .map(serde_json::to_value)
             .collect::<Result<_, _>>()
-            .map_err(|err| ErrorData::internal_error(err.to_string(), None))?;
+            .map_err(|err| ToolError::internal(err.to_string()))?;
         let (data, calls) = self
             .append_blocks_ordered(&request.workspace_id, &request.page_id, blocks)
             .await?;
@@ -336,12 +336,12 @@ impl AppServer {
     async fn appflowy_save_page(
         &self,
         Parameters(request): Parameters<SavePageRequest>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         require_non_empty(&request.title, "title")?;
         require_non_empty(&request.content, "content")?;
         validate_layout(request.layout)?;
         let blocks = parse_content_to_blocks(&request.content, &request.content_format)
-            .map_err(|message| ErrorData::invalid_params(message, None))?;
+            .map_err(ToolError::validation)?;
         let block_count = blocks.len();
         let data = create_page_with_blocks(
             &self.client,
@@ -369,16 +369,16 @@ impl AppServer {
     async fn appflowy_append_page_content(
         &self,
         Parameters(request): Parameters<AppendPageContentRequest>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         require_non_empty(&request.content, "content")?;
         let blocks = parse_content_to_blocks(&request.content, &request.content_format)
-            .map_err(|message| ErrorData::invalid_params(message, None))?;
+            .map_err(ToolError::validation)?;
         let block_count = blocks.len();
         let blocks: Vec<Value> = blocks
             .into_iter()
             .map(serde_json::to_value)
             .collect::<Result<_, _>>()
-            .map_err(|err| ErrorData::internal_error(err.to_string(), None))?;
+            .map_err(|err| ToolError::internal(err.to_string()))?;
         let (data, calls) = self
             .append_blocks_ordered(&request.workspace_id, &request.page_id, blocks)
             .await?;
@@ -397,7 +397,7 @@ impl AppServer {
     async fn appflowy_append_page_link(
         &self,
         Parameters(request): Parameters<AppendPageLinkRequest>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         require_non_empty(&request.target_page_id, "target_page_id")?;
         let data = self
             .client
@@ -432,7 +432,7 @@ impl AppServer {
     async fn appflowy_import_markdown_file(
         &self,
         Parameters(request): Parameters<ImportMarkdownFileRequest>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         require_non_empty(&request.path, "path")?;
         ensure_parent_is_not_workspace(&request.workspace_id, &request.parent_view_id)
             .map_err(map_tool_error)?;
@@ -457,7 +457,7 @@ impl AppServer {
     async fn appflowy_import_markdown_directory(
         &self,
         Parameters(request): Parameters<ImportMarkdownDirectoryRequest>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         require_non_empty(&request.path, "path")?;
         ensure_parent_is_not_workspace(&request.workspace_id, &request.parent_view_id)
             .map_err(map_tool_error)?;

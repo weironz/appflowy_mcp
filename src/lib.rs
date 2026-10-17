@@ -2,6 +2,7 @@ pub mod b64;
 pub mod cli;
 pub mod client;
 pub mod collab;
+pub mod collab_doc;
 pub mod collab_edit;
 pub mod delta;
 pub mod error;

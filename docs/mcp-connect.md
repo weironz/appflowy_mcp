@@ -1,6 +1,6 @@
 # Connecting appflowy to Codex / Claude / Cursor (MCP)
 
-`appflowy serve` exposes AppFlowy Cloud as **114 MCP tools** to any MCP client:
+`appflowy serve` exposes AppFlowy Cloud as **128 MCP tools** to any MCP client:
 workspace/space/page CRUD, Markdown import & export, PDF export, databases and CSV import, row operations, publishing, document comments, page sharing, notifications, file upload, AI chat and meeting transcription. A typical workflow: **let an agent write conversations and notes straight into your AppFlowy workspace**, or export the whole workspace to Markdown for backup.
 
 Install the binary first (one-line scripts: [installation.md](installation.md)), then follow the section for your client.
@@ -101,7 +101,7 @@ User-level `~/.cursor/mcp.json` (visible in every project — recommended for cr
 }
 ```
 
-The project-level `.cursor/mcp.json` has the same shape, but **that file is git-tracked — never put account credentials in it** (see "Credentials" above). Check Settings → MCP to confirm it loaded; verify by asking Cursor to count the tools (should be 114).
+The project-level `.cursor/mcp.json` has the same shape, but **that file is git-tracked — never put account credentials in it** (see "Credentials" above). Check Settings → MCP to confirm it loaded; verify by asking Cursor to count the tools (should be 128).
 
 ## Need HTTP instead of stdio? (rare)
 
@@ -112,7 +112,7 @@ appflowy serve --http 127.0.0.1:8000                 # local dev tunnel
 appflowy serve --http 0.0.0.0:8000 --allow-remote    # internal network (read below)
 ```
 
-The endpoint is `http://ADDR/mcp`; HTTP-capable clients point straight at the URL. **Guardrails**: loopback Hosts only and browser Origins rejected by default; binding a non-loopback address requires `--allow-remote` — anyone who can reach that port can drive all 114 tools with your AppFlowy credentials. There is no OAuth yet, so put it behind a trusted network or a gateway you control.
+The endpoint is `http://ADDR/mcp`; HTTP-capable clients point straight at the URL. **Guardrails**: loopback Hosts only and browser Origins rejected by default; binding a non-loopback address requires `--allow-remote` — anyone who can reach that port can drive all 128 tools with your AppFlowy credentials. There is no OAuth yet, so put it behind a trusted network or a gateway you control.
 
 ## Troubleshooting
 
@@ -120,4 +120,4 @@ The endpoint is `http://ADDR/mcp`; HTTP-capable clients point straight at the UR
 - **Every tool call fails 401 / Not authenticated**: the env never reached the server process — wrong key names in the client config (`APPFLOWY_EMAIL`/`APPFLOWY_PASSWORD` exactly), or you were counting on `credentials.json` (the server does not read it, see "Credentials"). **Restart the client** after changing config.
 - **404s or odd errors on self-hosted servers**: `APPFLOWY_BASE_URL` points at an old image; some endpoints (comment v2, share details, meeting transcription, …) only exist on the newer commercial cloud — the server degrades or reports a clear 404. Upgrade the self-hosted image, or use the official cloud.
 - **Watch the protocol traffic**: all logs go to stderr (stdout is the JSON-RPC channel and stays clean); add `RUST_LOG=debug` to the client's env.
-- **Verify the tool set**: ask the client to run `appflowy_list_workspaces` — it should return your workspaces. Then count the tools: it should be **114** (older binaries report 81; fewer than that means an old release is being launched).
+- **Verify the tool set**: ask the client to run `appflowy_list_workspaces` — it should return your workspaces. Then count the tools: it should be **128** (older binaries report 81; fewer than that means an old release is being launched).

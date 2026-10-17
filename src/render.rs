@@ -5,17 +5,49 @@ use serde_json::Value;
 use crate::collab::{BlockEntry, Document};
 use crate::delta::DeltaOp;
 
+/// Escape the literal Markdown metacharacters in a plain (non-code) text run
+/// so that re-importing yields the same characters. Applied to the raw insert
+/// *before* the bold/italic/strikethrough wrappers are added (the wrappers
+/// themselves must stay markers), which is the "only when unavoidable"
+/// boundary: everything a plain run contains of `\`, `` ` ``, `*`, `[`, `]`
+/// IS escaped — anything less re-imports as formatting. Exemptions:
+/// - code spans: content is verbatim (import parses nothing inside);
+/// - href URLs: copied raw (import reads them raw up to the first `)`);
+/// - image alt/caption text: written verbatim (import extracts it by regex
+///   before inline parsing, so escapes there would surface as literal
+///   backslashes in captions);
+/// - `|`: handled by the table-cell rule (`\|` <-> `|`), not here — a `|`
+///   outside a table needs no escape on either side.
+///
+/// `parse_rich_text` un-escapes exactly the same set, so plain text with
+/// literal metacharacters round-trips.
+fn escape_inline(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        if matches!(ch, '\\' | '`' | '*' | '[' | ']') {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
+}
+
 /// Render a rich-text delta as inline Markdown. Wrapping order matches
-/// Python: code -> bold -> italic -> strikethrough -> link.
+/// Python: code -> bold -> italic -> strikethrough -> link. Every attribute
+/// combination here re-imports to the same op attributes except bold +
+/// italic on a single span (`***x***`) — the parser reads layered same-span
+/// emphasis as separate runs, and there is no unambiguous Markdown spelling
+/// for it; that combination was lossy on the regex parser too.
 pub fn delta_to_markdown(delta: &[DeltaOp]) -> String {
     let mut out = String::new();
     for op in delta {
-        let mut text = op.insert.clone();
         let empty = serde_json::Map::new();
         let attrs = op.attributes.as_ref().unwrap_or(&empty);
-        if attrs.get("code").is_some_and(py_truthy) {
-            text = format!("`{text}`");
-        }
+        let mut text = if attrs.get("code").is_some_and(py_truthy) {
+            format!("`{}`", op.insert)
+        } else {
+            escape_inline(&op.insert)
+        };
         if attrs.get("bold").is_some_and(py_truthy) {
             text = format!("**{text}**");
         }

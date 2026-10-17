@@ -1,7 +1,9 @@
 //! Import tools: CSV-to-database import (`appflowy_import_csv`,
-//! `appflowy_get_csv_import_status`, `appflowy_cancel_csv_import`) and
+//! `appflowy_get_csv_import_status`, `appflowy_cancel_csv_import`),
 //! document file import (`appflowy_import_document`,
-//! `appflowy_get_document_import_status`).
+//! `appflowy_get_document_import_status`) and Notion zip import
+//! (`appflowy_import_notion_zip`, `appflowy_get_import_task`,
+//! `appflowy_cancel_import_task`).
 //!
 //! Payloads mirror AppFlowy-Web `src/application/types.ts`
 //! (`DatabaseCsvImportRequest`, `DocumentFileImportRequest`) and the call
@@ -15,13 +17,13 @@ use std::path::Path;
 
 use reqwest::Method;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::{tool, tool_router, ErrorData, Json};
+use rmcp::{tool, tool_router, Json};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::error::{Error, Result as AppResult};
 use crate::server::AppServer;
-use crate::tools::util::map_tool_error;
+use crate::tools::util::{map_tool_error, ToolError};
 
 /// Content type the server signs each document-import presigned URL for;
 /// the PUT must carry the same value or S3 rejects the signature.
@@ -70,6 +72,107 @@ async fn put_presigned(presigned_url: &str, content_type: &str, bytes: Vec<u8>) 
             "Presigned URL upload rejected with HTTP {status}"
         )));
     }
+    Ok(())
+}
+
+/// PUT one multipart chunk to a presigned part URL and return the ETag the
+/// storage assigns it. Same standalone, no-auth client as [`put_presigned`];
+/// presigned part URLs do not sign a Content-Type, so none is sent. S3
+/// returns the ETag in a response header, passed verbatim into the
+/// complete-multipart payload.
+async fn put_presigned_part(presigned_url: &str, bytes: &[u8]) -> AppResult<String> {
+    let response = reqwest::Client::new()
+        .put(presigned_url)
+        .body(bytes.to_vec())
+        .send()
+        .await
+        .map_err(|err| Error::Other(format!("Presigned part upload failed: {err}")))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(Error::Other(format!(
+            "Presigned part upload rejected with HTTP {status}"
+        )));
+    }
+    response
+        .headers()
+        .get(reqwest::header::ETAG)
+        .and_then(|value| value.to_str().ok())
+        .filter(|etag| !etag.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| Error::Other("Presigned part upload response is missing ETag".into()))
+}
+
+/// Multipart branch of the Notion import flow: slice the zip into
+/// `ceil(len / part_count)` chunks and PUT each to its presigned part URL in
+/// the order the server listed them, then complete via
+/// `POST /api/import/complete-multipart`.
+async fn complete_import_multipart(
+    server: &AppServer,
+    multipart: &Value,
+    bytes: &[u8],
+) -> AppResult<()> {
+    let upload_id = multipart
+        .get("upload_id")
+        .and_then(Value::as_str)
+        .filter(|upload_id| !upload_id.is_empty())
+        .ok_or_else(|| {
+            Error::Other("Import task multipart response is missing upload_id".into())
+        })?;
+    let s3_key = multipart
+        .get("s3_key")
+        .and_then(Value::as_str)
+        .filter(|s3_key| !s3_key.is_empty())
+        .ok_or_else(|| Error::Other("Import task multipart response is missing s3_key".into()))?;
+    let part_urls = multipart
+        .get("part_presigned_urls")
+        .and_then(Value::as_array)
+        .filter(|urls| !urls.is_empty())
+        .ok_or_else(|| {
+            Error::Other("Import task multipart response is missing part_presigned_urls".into())
+        })?;
+    let chunk_size = bytes.len().div_ceil(part_urls.len()).max(1);
+    let mut parts = Vec::with_capacity(part_urls.len());
+    for (index, part) in part_urls.iter().enumerate() {
+        let part_number = part
+            .get("part_number")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| {
+                Error::Other(format!(
+                    "Import task multipart part {index} is missing part_number"
+                ))
+            })?;
+        let presigned_url = part
+            .get("presigned_url")
+            .and_then(Value::as_str)
+            .filter(|url| !url.is_empty())
+            .ok_or_else(|| {
+                Error::Other(format!(
+                    "Import task multipart part {part_number} is missing presigned_url"
+                ))
+            })?;
+        let start = index * chunk_size;
+        let end = ((index + 1) * chunk_size).min(bytes.len());
+        let chunk = if start < end {
+            &bytes[start..end]
+        } else {
+            &[][..]
+        };
+        let e_tag = put_presigned_part(presigned_url, chunk).await?;
+        parts.push(json!({ "e_tag": e_tag, "part_number": part_number }));
+    }
+    server
+        .client
+        .request(
+            Method::POST,
+            "/api/import/complete-multipart",
+            None,
+            Some(json!({
+                "s3_key": s3_key,
+                "upload_id": upload_id,
+                "parts": parts,
+            })),
+        )
+        .await?;
     Ok(())
 }
 
@@ -171,6 +274,37 @@ pub struct DocumentImportTaskRequest {
     pub task_id: String,
 }
 
+/// Notion zip import request. The create-task payload mirrors AppFlowy-Web
+/// `import-api.ts` (`{content_length, md5_base64}`; `md5_base64` is left out
+/// because this crate has no md5 dependency — the client strips top-level
+/// nulls).
+#[derive(Debug, Default, Deserialize, rmcp::schemars::JsonSchema)]
+#[serde(default)]
+pub struct ImportNotionZipRequest {
+    /// Workspace importing the Notion zip.
+    pub workspace_id: String,
+    /// Parent page (view_id) the imported Notion pages are created under;
+    /// sent as the `page_id` query parameter.
+    pub parent_view_id: String,
+    /// Local path of the .zip file exported from Notion.
+    pub path: String,
+    /// If true, wait for the server-side import to finish. Not implemented:
+    /// the call always returns once the zip is staged; poll
+    /// appflowy_get_import_task to track progress.
+    pub wait: Option<bool>,
+}
+
+/// Status polling / cancellation request for import tasks. The endpoints
+/// (`GET /api/import`, `POST /api/import/tasks/{task_id}/cancel`) are not
+/// scoped to a workspace, so only the task id is needed.
+#[derive(Debug, Default, Deserialize, rmcp::schemars::JsonSchema)]
+#[serde(default)]
+pub struct ImportTaskRequest {
+    /// Task id returned by appflowy_import_notion_zip (or any other import
+    /// flow managed by GET /api/import).
+    pub task_id: String,
+}
+
 fn require_non_empty(value: &str, field: &str) -> AppResult<()> {
     if value.is_empty() {
         return Err(Error::Validation(format!("{field} must not be empty")));
@@ -187,7 +321,7 @@ impl AppServer {
     async fn appflowy_import_csv(
         &self,
         Parameters(request): Parameters<ImportCsvRequest>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         require_non_empty(&request.workspace_id, "workspace_id").map_err(map_tool_error)?;
         require_non_empty(&request.path, "path").map_err(map_tool_error)?;
         let path = Path::new(&request.path);
@@ -196,13 +330,10 @@ impl AppServer {
             .map(|ext| ext.to_string_lossy().to_lowercase())
             .unwrap_or_default();
         if extension != "csv" {
-            return Err(ErrorData::invalid_params(
-                format!(
-                    "Only .csv files are supported for database import, got: {}",
-                    request.path
-                ),
-                None,
-            ));
+            return Err(ToolError::validation(format!(
+                "Only .csv files are supported for database import, got: {}",
+                request.path
+            )));
         }
         let mode = request
             .mode
@@ -210,16 +341,14 @@ impl AppServer {
             .filter(|mode| !mode.is_empty())
             .unwrap_or("create");
         if !["create", "append", "replace"].contains(&mode) {
-            return Err(ErrorData::invalid_params(
-                format!("mode must be one of \"create\", \"append\", \"replace\", got \"{mode}\""),
-                None,
-            ));
+            return Err(ToolError::validation(format!(
+                "mode must be one of \"create\", \"append\", \"replace\", got \"{mode}\""
+            )));
         }
         if mode != "create" && request.database_id.as_deref().is_none_or(str::is_empty) {
-            return Err(ErrorData::invalid_params(
-                format!("database_id is required for mode \"{mode}\""),
-                None,
-            ));
+            return Err(ToolError::validation(format!(
+                "database_id is required for mode \"{mode}\""
+            )));
         }
         let layout = request
             .layout
@@ -227,12 +356,9 @@ impl AppServer {
             .filter(|layout| !layout.is_empty())
             .unwrap_or("grid");
         if !["grid", "board", "calendar"].contains(&layout) {
-            return Err(ErrorData::invalid_params(
-                format!(
-                    "layout must be one of \"grid\", \"board\", \"calendar\", got \"{layout}\""
-                ),
-                None,
-            ));
+            return Err(ToolError::validation(format!(
+                "layout must be one of \"grid\", \"board\", \"calendar\", got \"{layout}\""
+            )));
         }
         let bytes = read_import_file(path).await.map_err(map_tool_error)?;
         let name = request
@@ -277,7 +403,7 @@ impl AppServer {
     async fn appflowy_get_csv_import_status(
         &self,
         Parameters(request): Parameters<CsvImportTaskRequest>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         require_non_empty(&request.workspace_id, "workspace_id").map_err(map_tool_error)?;
         require_non_empty(&request.task_id, "task_id").map_err(map_tool_error)?;
         self.client
@@ -302,7 +428,7 @@ impl AppServer {
     async fn appflowy_cancel_csv_import(
         &self,
         Parameters(request): Parameters<CsvImportTaskRequest>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         require_non_empty(&request.workspace_id, "workspace_id").map_err(map_tool_error)?;
         require_non_empty(&request.task_id, "task_id").map_err(map_tool_error)?;
         self.client
@@ -327,7 +453,7 @@ impl AppServer {
     async fn appflowy_import_document(
         &self,
         Parameters(request): Parameters<ImportDocumentRequest>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         require_non_empty(&request.workspace_id, "workspace_id").map_err(map_tool_error)?;
         require_non_empty(&request.parent_view_id, "parent_view_id").map_err(map_tool_error)?;
         require_non_empty(&request.path, "path").map_err(map_tool_error)?;
@@ -337,12 +463,9 @@ impl AppServer {
             .map(|ext| ext.to_string_lossy().to_lowercase())
             .unwrap_or_default();
         if !["doc", "html", "docx", "pdf"].contains(&format.as_str()) {
-            return Err(ErrorData::invalid_params(
-                format!(
+            return Err(ToolError::validation(format!(
                     "Unsupported document format: \"{format}\". Supported formats: doc, html, docx, pdf"
-                ),
-                None,
-            ));
+                )));
         }
         let bytes = read_import_file(path).await.map_err(map_tool_error)?;
         let file_name = path
@@ -376,7 +499,7 @@ impl AppServer {
     async fn appflowy_get_document_import_status(
         &self,
         Parameters(request): Parameters<DocumentImportTaskRequest>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         require_non_empty(&request.workspace_id, "workspace_id").map_err(map_tool_error)?;
         require_non_empty(&request.task_id, "task_id").map_err(map_tool_error)?;
         self.client
@@ -386,6 +509,136 @@ impl AppServer {
                     "/api/import/{}/document/{}",
                     request.workspace_id, request.task_id
                 ),
+                None,
+                None,
+            )
+            .await
+            .map(Json)
+            .map_err(map_tool_error)
+    }
+
+    #[tool(
+        name = "appflowy_import_notion_zip",
+        description = "Import a local .zip file exported from Notion into an AppFlowy workspace under a parent page. The task is created via POST /api/import/{workspace_id}/notion and the zip is staged to the returned presigned URL (single PUT, or per-part PUTs plus complete-multipart when the server requests multipart). The server-side import then runs in the background; poll with appflowy_get_import_task."
+    )]
+    async fn appflowy_import_notion_zip(
+        &self,
+        Parameters(request): Parameters<ImportNotionZipRequest>,
+    ) -> Result<Json<Value>, ToolError> {
+        require_non_empty(&request.workspace_id, "workspace_id").map_err(map_tool_error)?;
+        require_non_empty(&request.parent_view_id, "parent_view_id").map_err(map_tool_error)?;
+        require_non_empty(&request.path, "path").map_err(map_tool_error)?;
+        let path = Path::new(&request.path);
+        let extension = path
+            .extension()
+            .map(|ext| ext.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+        if extension != "zip" {
+            return Err(ToolError::validation(format!(
+                "Only .zip files are supported for Notion import, got: {}",
+                request.path
+            )));
+        }
+        let bytes = read_import_file(path).await.map_err(map_tool_error)?;
+        let base_url = self.client.base_url().await;
+        let headers: Vec<(&str, &str)> = vec![("X-Host", &base_url)];
+        let params = [("page_id", request.parent_view_id.clone())];
+        let task = self
+            .client
+            .request_ext(
+                Method::POST,
+                &format!("/api/import/{}/notion", request.workspace_id),
+                Some(&params),
+                // md5_base64 is optional in AppFlowy-Web's payload; this
+                // crate has no md5 dependency, so it is left out (the client
+                // strips top-level nulls from the JSON body).
+                Some(json!({
+                    "content_length": bytes.len(),
+                    "md5_base64": Value::Null,
+                })),
+                &headers,
+            )
+            .await
+            .map_err(map_tool_error)?;
+        match task.get("multipart").filter(|value| !value.is_null()) {
+            Some(multipart) => complete_import_multipart(self, multipart, &bytes)
+                .await
+                .map_err(map_tool_error)?,
+            None => {
+                let presigned_url = task
+                    .get("presigned_url")
+                    .and_then(Value::as_str)
+                    .filter(|url| !url.is_empty())
+                    .ok_or_else(|| {
+                        map_tool_error(Error::Other(
+                            "Notion import task creation response is missing presigned_url".into(),
+                        ))
+                    })?;
+                put_presigned(presigned_url, "application/zip", bytes)
+                    .await
+                    .map_err(map_tool_error)?;
+            }
+        }
+        Ok(Json(json!({
+            "task": task,
+            "uploaded": true,
+            "note": "server-side import runs in background; poll appflowy_get_import_task",
+        })))
+    }
+
+    #[tool(
+        name = "appflowy_get_import_task",
+        description = "Get the status of an import task (e.g. one created by appflowy_import_notion_zip). The public client exposes no per-task status endpoint, so this calls GET /api/import and filters the returned task list by task_id; the task entry is returned verbatim with `found: true`. The `status` field may be an enum number or a string — its values are passed through as-is and the enumeration shown by the server (e.g. pending/uploading/importing/succeeded/failed) is not exhaustively documented; treat the server as authoritative. If the task is absent from the list, returns {task_id, status: \"unknown\", found: false}."
+    )]
+    async fn appflowy_get_import_task(
+        &self,
+        Parameters(request): Parameters<ImportTaskRequest>,
+    ) -> Result<Json<Value>, ToolError> {
+        require_non_empty(&request.task_id, "task_id").map_err(map_tool_error)?;
+        let response = self
+            .client
+            .request(Method::GET, "/api/import", None, None)
+            .await
+            .map_err(map_tool_error)?;
+        let tasks = response
+            .get("tasks")
+            .and_then(Value::as_array)
+            .ok_or_else(|| {
+                map_tool_error(Error::Other(
+                    "GET /api/import response is missing the tasks list".into(),
+                ))
+            })?;
+        let found = tasks.iter().find(|entry| {
+            entry.get("task_id").and_then(Value::as_str) == Some(request.task_id.as_str())
+        });
+        match found {
+            Some(Value::Object(entry)) => {
+                let mut entry = entry.clone();
+                entry.insert("found".into(), json!(true));
+                Ok(Json(Value::Object(entry)))
+            }
+            Some(other) => Ok(Json(json!({ "task": other.clone(), "found": true }))),
+            None => Ok(Json(json!({
+                "task_id": request.task_id,
+                "status": "unknown",
+                "found": false,
+            }))),
+        }
+    }
+
+    #[tool(
+        name = "appflowy_cancel_import_task",
+        description = "Cancel a running import task (e.g. one created by appflowy_import_notion_zip) via POST /api/import/tasks/{task_id}/cancel."
+    )]
+    async fn appflowy_cancel_import_task(
+        &self,
+        Parameters(request): Parameters<ImportTaskRequest>,
+    ) -> Result<Json<Value>, ToolError> {
+        require_non_empty(&request.task_id, "task_id").map_err(map_tool_error)?;
+        self.client
+            .request(
+                Method::POST,
+                &format!("/api/import/tasks/{}/cancel", request.task_id),
                 None,
                 None,
             )

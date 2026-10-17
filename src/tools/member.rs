@@ -2,12 +2,12 @@
 
 use reqwest::Method;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::{tool, tool_router, ErrorData, Json};
+use rmcp::{tool, tool_router, Json};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::server::AppServer;
-use crate::tools::util::map_tool_error;
+use crate::tools::util::{map_tool_error, ToolError};
 
 /// `WorkspaceRole = Literal["Owner", "Member", "Guest"]` from Python
 /// `models.py` as a closed enum: serde rejects any other value during
@@ -130,12 +130,12 @@ impl AppServer {
     async fn appflowy_create_workspace(
         &self,
         Parameters(request): Parameters<CreateWorkspaceRequest>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         let workspace_name = request
             .workspace_name
             .filter(|name| !name.is_empty())
             .ok_or_else(|| {
-                ErrorData::invalid_params("workspace_name is required and must not be empty.", None)
+                ToolError::validation("workspace_name is required and must not be empty.")
             })?;
         let data = self
             .client
@@ -160,7 +160,7 @@ impl AppServer {
     async fn appflowy_update_workspace(
         &self,
         Parameters(request): Parameters<UpdateWorkspaceRequest>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         // Python quirk: workspace_id travels in the JSON body, not the URL
         // (unlike appflowy_delete_workspace, which uses a path parameter).
         self.client
@@ -188,7 +188,7 @@ impl AppServer {
     async fn appflowy_delete_workspace(
         &self,
         Parameters(params): Parameters<WorkspaceIdParams>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         self.client
             .request(
                 Method::DELETE,
@@ -208,7 +208,7 @@ impl AppServer {
     async fn appflowy_leave_workspace(
         &self,
         Parameters(params): Parameters<WorkspaceIdParams>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         // This endpoint expects a literal JSON null body.
         self.client
             .request_content(
@@ -229,7 +229,7 @@ impl AppServer {
     async fn appflowy_get_workspace_settings(
         &self,
         Parameters(params): Parameters<WorkspaceIdParams>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         let data = self
             .client
             .request(
@@ -250,7 +250,7 @@ impl AppServer {
     async fn appflowy_update_workspace_settings(
         &self,
         Parameters(request): Parameters<UpdateWorkspaceSettingsRequest>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         let data = self
             .client
             .request(
@@ -274,7 +274,7 @@ impl AppServer {
     async fn appflowy_get_workspace_usage(
         &self,
         Parameters(params): Parameters<WorkspaceIdParams>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         let data = self
             .client
             .request(
@@ -295,7 +295,7 @@ impl AppServer {
     async fn appflowy_list_members(
         &self,
         Parameters(params): Parameters<WorkspaceIdParams>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         let data = self
             .client
             .request(
@@ -316,13 +316,11 @@ impl AppServer {
     async fn appflowy_update_member(
         &self,
         Parameters(request): Parameters<UpdateMemberRequest>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         let email = request
             .email
             .filter(|email| !email.is_empty())
-            .ok_or_else(|| {
-                ErrorData::invalid_params("email is required and must not be empty.", None)
-            })?;
+            .ok_or_else(|| ToolError::validation("email is required and must not be empty."))?;
         self.client
             .request(
                 Method::PUT,
@@ -346,14 +344,11 @@ impl AppServer {
     async fn appflowy_remove_members(
         &self,
         Parameters(params): Parameters<RemoveMembersParams>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         // Python raises this outside the try block; it is a caller bug, so
-        // invalid_params rather than an internal error.
+        // an isError tool result rather than a protocol error.
         if params.emails.is_empty() {
-            return Err(ErrorData::invalid_params(
-                "At least one email is required.",
-                None,
-            ));
+            return Err(ToolError::validation("At least one email is required."));
         }
         // The API takes a top-level JSON array body; the client passes
         // non-object bodies through untouched.
@@ -380,11 +375,10 @@ impl AppServer {
     async fn appflowy_invite_members(
         &self,
         Parameters(request): Parameters<InviteMembersRequest>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         if request.emails.is_empty() {
-            return Err(ErrorData::invalid_params(
+            return Err(ToolError::validation(
                 "emails must contain at least one item.",
-                None,
             ));
         }
         let invitations: Vec<Value> = request
@@ -421,7 +415,7 @@ impl AppServer {
     async fn appflowy_list_invitations(
         &self,
         Parameters(params): Parameters<ListInvitationsParams>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         // Python: `params = {"status": status} if status else None`.
         let query: Vec<(&str, String)> = params
             .status
@@ -444,7 +438,7 @@ impl AppServer {
     async fn appflowy_accept_invitation(
         &self,
         Parameters(params): Parameters<AcceptInvitationParams>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         // This endpoint expects a literal JSON null body.
         self.client
             .request_content(
@@ -462,7 +456,7 @@ impl AppServer {
         name = "appflowy_get_user_profile",
         description = "Get the authenticated user's profile (uid, email, name, latest workspace)."
     )]
-    async fn appflowy_get_user_profile(&self) -> Result<Json<Value>, ErrorData> {
+    async fn appflowy_get_user_profile(&self) -> Result<Json<Value>, ToolError> {
         let data = self
             .client
             .request(Method::GET, "/api/user/profile", None, None)

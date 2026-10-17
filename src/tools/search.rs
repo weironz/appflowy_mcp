@@ -2,12 +2,12 @@
 
 use reqwest::Method;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::{tool, tool_router, ErrorData, Json};
+use rmcp::{tool, tool_router, Json};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::server::AppServer;
-use crate::tools::util::map_tool_error;
+use crate::tools::util::{map_tool_error, ToolError};
 
 /// Python-style `or` truthiness over JSON: null, false, 0, and empty
 /// strings/arrays/objects fall through to the next candidate.
@@ -51,7 +51,7 @@ impl AppServer {
     async fn appflowy_search(
         &self,
         Parameters(request): Parameters<SearchRequest>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         let params: Vec<(&str, String)> = vec![
             ("query", request.query.clone()),
             ("limit", request.limit.unwrap_or(10).to_string()),
@@ -80,7 +80,7 @@ impl AppServer {
     async fn appflowy_search_summary(
         &self,
         Parameters(request): Parameters<SearchSummaryRequest>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         let search_path = format!("/api/search/{}", request.workspace_id);
         let params: Vec<(&str, String)> = vec![
             ("query", request.query.clone()),

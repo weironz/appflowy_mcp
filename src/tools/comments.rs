@@ -9,12 +9,12 @@
 
 use reqwest::Method;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::{tool, tool_router, ErrorData, Json};
+use rmcp::{tool, tool_router, Json};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::server::AppServer;
-use crate::tools::util::map_tool_error;
+use crate::tools::util::{map_tool_error, ToolError};
 
 fn inline_comment_base(workspace_id: &str, view_id: &str) -> String {
     format!("/api/workspace/{workspace_id}/document/{view_id}/inline-comment")
@@ -27,12 +27,9 @@ fn device_id_header() -> (String, String) {
     ("device-id".to_string(), uuid::Uuid::new_v4().to_string())
 }
 
-fn require_non_empty(value: &str, field: &str) -> Result<(), ErrorData> {
+fn require_non_empty(value: &str, field: &str) -> Result<(), ToolError> {
     if value.trim().is_empty() {
-        return Err(ErrorData::invalid_params(
-            format!("{field} must not be empty"),
-            None,
-        ));
+        return Err(ToolError::validation(format!("{field} must not be empty")));
     }
     Ok(())
 }
@@ -147,7 +144,7 @@ impl AppServer {
     async fn appflowy_list_inline_comments(
         &self,
         Parameters(request): Parameters<ListInlineCommentsRequest>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         require_non_empty(&request.workspace_id, "workspace_id")?;
         require_non_empty(&request.view_id, "view_id")?;
         let params = vec![
@@ -173,7 +170,7 @@ impl AppServer {
     async fn appflowy_add_inline_comment(
         &self,
         Parameters(request): Parameters<AddInlineCommentRequest>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         require_non_empty(&request.workspace_id, "workspace_id")?;
         require_non_empty(&request.view_id, "view_id")?;
         require_non_empty(&request.content, "content")?;
@@ -219,7 +216,7 @@ impl AppServer {
     async fn appflowy_resolve_inline_comment(
         &self,
         Parameters(request): Parameters<ResolveInlineCommentRequest>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         require_non_empty(&request.workspace_id, "workspace_id")?;
         require_non_empty(&request.view_id, "view_id")?;
         require_non_empty(&request.comment_id, "comment_id")?;
@@ -251,7 +248,7 @@ impl AppServer {
     async fn appflowy_delete_inline_comment(
         &self,
         Parameters(request): Parameters<DeleteInlineCommentRequest>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         require_non_empty(&request.workspace_id, "workspace_id")?;
         require_non_empty(&request.view_id, "view_id")?;
         require_non_empty(&request.comment_id, "comment_id")?;
@@ -277,7 +274,7 @@ impl AppServer {
     async fn appflowy_list_inline_comment_reactions(
         &self,
         Parameters(request): Parameters<ListInlineCommentReactionsRequest>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         require_non_empty(&request.workspace_id, "workspace_id")?;
         require_non_empty(&request.view_id, "view_id")?;
         let params: Vec<(&str, String)> = request
@@ -307,7 +304,7 @@ impl AppServer {
     async fn appflowy_add_inline_comment_reaction(
         &self,
         Parameters(request): Parameters<InlineCommentReactionRequest>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         require_non_empty(&request.workspace_id, "workspace_id")?;
         require_non_empty(&request.view_id, "view_id")?;
         require_non_empty(&request.comment_id, "comment_id")?;
@@ -340,7 +337,7 @@ impl AppServer {
     async fn appflowy_delete_inline_comment_reaction(
         &self,
         Parameters(request): Parameters<InlineCommentReactionRequest>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         require_non_empty(&request.workspace_id, "workspace_id")?;
         require_non_empty(&request.view_id, "view_id")?;
         require_non_empty(&request.comment_id, "comment_id")?;
@@ -373,7 +370,7 @@ impl AppServer {
     async fn appflowy_notify_row_comment(
         &self,
         Parameters(request): Parameters<NotifyRowCommentRequest>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         require_non_empty(&request.workspace_id, "workspace_id")?;
         require_non_empty(&request.database_id, "database_id")?;
         require_non_empty(&request.row_id, "row_id")?;

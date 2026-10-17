@@ -2,12 +2,12 @@
 
 use reqwest::Method;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::{tool, tool_router, ErrorData, Json};
+use rmcp::{tool, tool_router, Json};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::server::AppServer;
-use crate::tools::util::map_tool_error;
+use crate::tools::util::{map_tool_error, ToolError};
 
 /// Faithful port of Python `server.py::quick_note_data`: raw `data` wins over
 /// `text`; text becomes one `paragraph` block per `splitlines()` line. An
@@ -75,7 +75,7 @@ impl AppServer {
     async fn appflowy_list_quick_notes(
         &self,
         Parameters(request): Parameters<ListQuickNotesRequest>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         // Python only sends params whose value is not None.
         let mut params: Vec<(&str, String)> = Vec::new();
         if let Some(search_term) = &request.search_term {
@@ -112,7 +112,7 @@ impl AppServer {
     async fn appflowy_create_quick_note(
         &self,
         Parameters(request): Parameters<CreateQuickNoteRequest>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         let data = self
             .client
             .request(
@@ -135,9 +135,9 @@ impl AppServer {
     async fn appflowy_update_quick_note(
         &self,
         Parameters(request): Parameters<UpdateQuickNoteRequest>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         let data = quick_note_data(request.text.as_deref(), request.data.as_ref())
-            .ok_or_else(|| ErrorData::invalid_params("Either text or data is required.", None))?;
+            .ok_or_else(|| ToolError::validation("Either text or data is required."))?;
         self.client
             .request(
                 Method::PUT,
@@ -160,7 +160,7 @@ impl AppServer {
     async fn appflowy_delete_quick_note(
         &self,
         Parameters(request): Parameters<DeleteQuickNoteRequest>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         self.client
             .request(
                 Method::DELETE,

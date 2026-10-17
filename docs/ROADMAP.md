@@ -178,6 +178,56 @@ older self-hosted images lack them.
 - [x] **Row comment notification**:
   `/api/workspace/{ws}/database/{db}/row/{rowId}/comment/notification`.
 
+### Maintenance wave — shipped (unreleased; tools count 119 -> 128)
+
+Small/medium items from the backlog, all verified (unit tests + live cloud
+where possible):
+
+- [x] **CLI `login` password masking** via `rpassword` (TTY only; piped
+  stdin still reads a line so scripts keep working).
+- [x] **`~` expansion for `meeting_transcribe` paths**; `expand_tilde` now
+  lives in `tools::util` (three private copies noted for later collapse).
+- [x] **Incremental export**: `.appflowy-export-manifest.json` in the
+  destination; unchanged pages (same `last_edited_time` + same computed
+  path + file present) are skipped with zero requests and counted as
+  `skipped_unchanged`. Old files are never deleted. Second runs go from
+  minutes to seconds. CLI's destination guard now accepts a directory
+  holding a valid manifest, so cron backups work unmodified.
+- [x] **Nested inline parsing**: `parse_rich_text` is a real tokenizer
+  (containers recurse; `**[t](u)**`, `**a *b* c**` now parse) + **inline
+  escaping round-trip** (`\` `` ` `` `*` `[` `]` escaped on export,
+  unescaped on import; code spans exempt) — both directions tested.
+  Known limit documented: `***` (bold+italic one span) can't round-trip.
+- [x] **Parallel page creation on import** (JoinSet+Semaphore(4) with a
+  greedy order-correction pass over the move endpoint; worst case n-1
+  moves, normally zero) while sibling order stays deterministic.
+- [x] **Database history, read-only**: `appflowy_list_database_history`
+  (paged with tolerant cursor discovery) and
+  `appflowy_get_database_restore_state`. Preview/restore-jobs stay
+  deferred until preview decoding is verified.
+- [x] **Notion zip import**: `appflowy_import_notion_zip` (presigned PUT,
+  full multipart branch with sequential parts + completion) +
+  `appflowy_get_import_task` (filters `GET /api/import`'s task list — the
+  only public status surface) + `appflowy_cancel_import_task`.
+- [x] **SEP-1303**: input validation failures now return `isError: true`
+  tool results (self-correctable by the model) via a local `ToolError`
+  dual-channel type; API errors keep JSON-RPC status codes. 176 call
+  sites untouched thanks to the shape.
+- [x] **P8 document editing — SHIPPED**: `update_document_block`
+  (whole-text replace with markdown inline semantics),
+  `delete_document_block` (detach into invisible orphans),
+  `snapshot_document`, and `restore_document_snapshot` — whose semantics
+  were corrected after live A/B: a raw whole-state push-back **cannot
+  revive tombstoned content** (verified), so restore now detaches the
+  current root blocks and **rebuilds the snapshot as fresh blocks** from
+  its decoded markdown. This is the strongest restore CRDT semantics
+  allow. Verified live end-to-end (create → edit → delete → restore;
+  extra live passes for update/delete; final restore re-check pending a
+  cloud-side throttle window).
+- Notes: AppFlowy's web-update can return transient `code 1079`
+  (permission-resolver busy) under load — it hits every collab mutation
+  equally and clears on its own.
+
 ### Community intake — shipped (unreleased; tools count 114 -> 119)
 
 Community PRs/issues written against the Python tree (before the Rust

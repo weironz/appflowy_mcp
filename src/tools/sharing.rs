@@ -4,12 +4,12 @@
 
 use reqwest::Method;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::{tool, tool_router, ErrorData, Json};
+use rmcp::{tool, tool_router, Json};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::server::AppServer;
-use crate::tools::util::map_tool_error;
+use crate::tools::util::{map_tool_error, ToolError};
 
 /// Access levels exactly as the AppFlowy-Web frontend defines them in
 /// `src/application/types.ts`: `ReadOnly = 10`, `ReadAndComment = 20`,
@@ -74,13 +74,12 @@ pub struct SharedWithMeParams {
     pub workspace_id: Option<String>,
 }
 
-fn required(value: Option<String>, field: &str) -> Result<String, ErrorData> {
+fn required(value: Option<String>, field: &str) -> Result<String, ToolError> {
     match value {
         Some(v) if !v.is_empty() => Ok(v),
-        _ => Err(ErrorData::invalid_params(
-            format!("`{field}` is required and must not be empty"),
-            None,
-        )),
+        _ => Err(ToolError::validation(format!(
+            "`{field}` is required and must not be empty"
+        ))),
     }
 }
 
@@ -123,21 +122,17 @@ impl AppServer {
     async fn appflowy_share_page(
         &self,
         Parameters(params): Parameters<SharePageParams>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         let workspace_id = required(params.workspace_id, "workspace_id")?;
         let view_id = required(params.view_id, "view_id")?;
         if params.emails.is_empty() {
-            return Err(ErrorData::invalid_params(
+            return Err(ToolError::validation(
                 "`emails` must contain at least one email address",
-                None,
             ));
         }
         let access_level = params.access_level.unwrap_or(DEFAULT_ACCESS_LEVEL);
         if !ACCESS_LEVELS.contains(&access_level) {
-            return Err(ErrorData::invalid_params(
-                "`access_level` must be one of 10 (ReadOnly), 20 (ReadAndComment), 30 (ReadAndWrite), 50 (FullAccess)",
-                None,
-            ));
+            return Err(ToolError::validation("`access_level` must be one of 10 (ReadOnly), 20 (ReadAndComment), 30 (ReadAndWrite), 50 (FullAccess)"));
         }
         self.client
             .request(
@@ -167,13 +162,12 @@ impl AppServer {
     async fn appflowy_revoke_page_access(
         &self,
         Parameters(params): Parameters<RevokePageAccessParams>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         let workspace_id = required(params.workspace_id, "workspace_id")?;
         let view_id = required(params.view_id, "view_id")?;
         if params.emails.is_empty() {
-            return Err(ErrorData::invalid_params(
+            return Err(ToolError::validation(
                 "`emails` must contain at least one email address",
-                None,
             ));
         }
         self.client
@@ -198,7 +192,7 @@ impl AppServer {
     async fn appflowy_get_page_access_details(
         &self,
         Parameters(params): Parameters<PageAccessDetailsParams>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         let workspace_id = required(params.workspace_id, "workspace_id")?;
         let view_id = required(params.view_id, "view_id")?;
         match self
@@ -228,10 +222,7 @@ impl AppServer {
                 let mut trail = Vec::new();
                 let ancestor_view_ids =
                     find_view_ancestors(&tree, &view_id, &mut trail).ok_or_else(|| {
-                        ErrorData::internal_error(
-                            format!("view '{view_id}' was not found in the workspace folder tree; cannot build ancestor_view_ids for the legacy access-details endpoint"),
-                            None,
-                        )
+                        ToolError::internal(format!("view '{view_id}' was not found in the workspace folder tree; cannot build ancestor_view_ids for the legacy access-details endpoint"))
                     })?;
                 let body = self
                     .client
@@ -258,7 +249,7 @@ impl AppServer {
     async fn appflowy_request_access(
         &self,
         Parameters(params): Parameters<RequestAccessParams>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         let workspace_id = required(params.workspace_id, "workspace_id")?;
         let view_id = required(params.view_id, "view_id")?;
         self.client
@@ -283,7 +274,7 @@ impl AppServer {
     async fn appflowy_get_access_request(
         &self,
         Parameters(params): Parameters<AccessRequestParams>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         let request_id = required(params.request_id, "request_id")?;
         let body = self
             .client
@@ -305,7 +296,7 @@ impl AppServer {
     async fn appflowy_approve_access_request(
         &self,
         Parameters(params): Parameters<AccessRequestParams>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         let request_id = required(params.request_id, "request_id")?;
         self.client
             .request(
@@ -329,7 +320,7 @@ impl AppServer {
     async fn appflowy_list_shared_with_me(
         &self,
         Parameters(params): Parameters<SharedWithMeParams>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         let workspace_id = required(params.workspace_id, "workspace_id")?;
         // Upstream (AppFlowy-Web access-api.ts) really does use the
         // workspace_id for both path segments here; not a typo.

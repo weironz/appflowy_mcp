@@ -2,7 +2,7 @@
 
 use reqwest::Method;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::{tool, tool_router, ErrorData, Json};
+use rmcp::{tool, tool_router, Json};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -12,7 +12,7 @@ use crate::collab_edit;
 use crate::error::Error;
 use crate::markdown::parse_markdown_to_blocks;
 use crate::server::AppServer;
-use crate::tools::util::map_tool_error;
+use crate::tools::util::{map_tool_error, ToolError};
 
 #[derive(Debug, Default, Deserialize, rmcp::schemars::JsonSchema)]
 #[serde(default)]
@@ -75,6 +75,27 @@ pub struct GetUpdatedRowsRequest {
     pub database_id: String,
     /// ISO 8601 datetime; only rows updated after it are returned.
     pub after: String,
+}
+
+#[derive(Debug, Default, Deserialize, rmcp::schemars::JsonSchema)]
+#[serde(default)]
+pub struct ListDatabaseHistoryRequest {
+    pub workspace_id: String,
+    pub database_id: String,
+    /// Page size; the API defaults to 30 when omitted.
+    pub limit: Option<i64>,
+    /// Unix seconds; only history entries at/after it are returned.
+    pub since: Option<i64>,
+    /// Follow the response's next-cursor fields and merge every page
+    /// (default false: return the first page as-is).
+    pub fetch_all: Option<bool>,
+}
+
+#[derive(Debug, Default, Deserialize, rmcp::schemars::JsonSchema)]
+#[serde(default)]
+pub struct GetDatabaseRestoreStateRequest {
+    pub workspace_id: String,
+    pub database_id: String,
 }
 
 /// AppFlowy's deterministic document UUID for a database row.
@@ -187,6 +208,40 @@ fn cells_or_none(cells: Value) -> Option<Value> {
     }
 }
 
+/// Upper bound on history pages fetched by `fetch_all`, guarding against a
+/// server which keeps handing out cursors.
+const MAX_HISTORY_PAGES: usize = 100;
+
+/// Candidates for the next-page cursor of a history response: top level or a
+/// nested `pagination` object (the web client expands it as the `cursor`
+/// query param). A null or empty value means there is no next page.
+fn history_next_cursor(page: &Value) -> Option<String> {
+    let cursor_at = |value: &Value| -> Option<String> {
+        ["next_cursor", "next", "cursor"].iter().find_map(|key| {
+            value
+                .get(*key)
+                .and_then(Value::as_str)
+                .filter(|cursor| !cursor.is_empty())
+                .map(str::to_string)
+        })
+    };
+    cursor_at(page)
+        .or_else(|| page.get("pagination").and_then(cursor_at))
+        .or_else(|| page.get("meta").and_then(cursor_at))
+}
+
+/// The item list of a history page: the page itself when it is an array,
+/// otherwise the first array under one of the usual list keys.
+fn history_page_items(page: &Value) -> Option<Vec<Value>> {
+    match page {
+        Value::Array(items) => Some(items.clone()),
+        Value::Object(_) => ["data", "items", "history"]
+            .iter()
+            .find_map(|key| page.get(*key).and_then(Value::as_array).cloned()),
+        _ => None,
+    }
+}
+
 #[tool_router(router = database_tool_router, vis = "pub(crate)")]
 impl AppServer {
     #[tool(
@@ -196,7 +251,7 @@ impl AppServer {
     async fn appflowy_list_databases(
         &self,
         Parameters(request): Parameters<ListDatabasesRequest>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         let data = self
             .client
             .request(
@@ -217,7 +272,7 @@ impl AppServer {
     async fn appflowy_get_database_fields(
         &self,
         Parameters(request): Parameters<GetDatabaseFieldsRequest>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         let fields = self
             .client
             .get_database_fields(&request.workspace_id, &request.database_id)
@@ -233,7 +288,7 @@ impl AppServer {
     async fn appflowy_list_rows(
         &self,
         Parameters(request): Parameters<ListRowsRequest>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         let rows = self
             .client
             .get_database_row_ids(&request.workspace_id, &request.database_id)
@@ -249,7 +304,7 @@ impl AppServer {
     async fn appflowy_get_row_details(
         &self,
         Parameters(request): Parameters<GetRowDetailsRequest>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         let ids: Vec<String> = request
             .row_ids
             .split(',')
@@ -258,10 +313,7 @@ impl AppServer {
             .map(str::to_string)
             .collect();
         if ids.is_empty() {
-            return Err(ErrorData::invalid_params(
-                "At least one row ID is required.",
-                None,
-            ));
+            return Err(ToolError::validation("At least one row ID is required."));
         }
         let details = self
             .client
@@ -283,7 +335,7 @@ impl AppServer {
     async fn appflowy_create_row(
         &self,
         Parameters(request): Parameters<CreateRowRequest>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         let initialized = request
             .document
             .as_deref()
@@ -325,7 +377,7 @@ impl AppServer {
     async fn appflowy_upsert_row(
         &self,
         Parameters(request): Parameters<UpsertRowRequest>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         let initialized = request
             .document
             .as_deref()
@@ -380,7 +432,7 @@ impl AppServer {
     async fn appflowy_get_updated_rows(
         &self,
         Parameters(request): Parameters<GetUpdatedRowsRequest>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         let updated_rows = self
             .client
             .get_database_row_ids_updated(
@@ -400,9 +452,9 @@ impl AppServer {
     async fn appflowy_append_markdown_to_row(
         &self,
         Parameters(request): Parameters<AppendMarkdownToRowRequest>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         if request.content.trim().is_empty() {
-            return Err(ErrorData::invalid_params("content must not be empty", None));
+            return Err(ToolError::validation("content must not be empty"));
         }
         let details = self
             .client
@@ -417,13 +469,10 @@ impl AppServer {
         let detail = match &details {
             Value::Array(items) if !items.is_empty() => &items[0],
             _ => {
-                return Err(ErrorData::invalid_params(
-                    format!(
-                        "Database row {} was not found in database {}.",
-                        request.row_id, request.database_id
-                    ),
-                    None,
-                ));
+                return Err(ToolError::validation(format!(
+                    "Database row {} was not found in database {}.",
+                    request.row_id, request.database_id
+                )));
             }
         };
         if !detail
@@ -468,15 +517,14 @@ impl AppServer {
     async fn appflowy_update_row(
         &self,
         Parameters(request): Parameters<UpdateRowRequest>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         let Value::Object(cells) = request.cells else {
-            return Err(ErrorData::invalid_params(
+            return Err(ToolError::validation(
                 "cells must be an object mapping a field name (or id) to a value.",
-                None,
             ));
         };
         if cells.is_empty() {
-            return Err(ErrorData::invalid_params("cells is empty.", None));
+            return Err(ToolError::validation("cells is empty."));
         }
         let details = self
             .client
@@ -489,13 +537,10 @@ impl AppServer {
             .await
             .map_err(map_tool_error)?;
         if !matches!(&details, Value::Array(items) if !items.is_empty()) {
-            return Err(ErrorData::invalid_params(
-                format!(
-                    "Database row {} was not found in database {}.",
-                    request.row_id, request.database_id
-                ),
-                None,
-            ));
+            return Err(ToolError::validation(format!(
+                "Database row {} was not found in database {}.",
+                request.row_id, request.database_id
+            )));
         }
         let fields_value = self
             .client
@@ -525,7 +570,7 @@ impl AppServer {
             let field = collab_edit::field_for(&fields, key).map_err(map_tool_error)?;
             let current = collab_edit::current_cell_data(&doc, &field.id);
             let entries = collab_edit::encode_cell(field, value, current.as_deref())
-                .map_err(|message| ErrorData::invalid_params(message, None))?;
+                .map_err(ToolError::validation)?;
             staged.push(collab_edit::StagedCell {
                 field: field.clone(),
                 entries,
@@ -559,7 +604,7 @@ impl AppServer {
         &self,
         params: RowRefRequest,
         deleted: bool,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         let details = self
             .client
             .get_database_row_details(
@@ -571,13 +616,10 @@ impl AppServer {
             .await
             .map_err(map_tool_error)?;
         if !matches!(&details, Value::Array(items) if !items.is_empty()) {
-            return Err(ErrorData::invalid_params(
-                format!(
-                    "Database row {} was not found in database {}.",
-                    params.row_id, params.database_id
-                ),
-                None,
-            ));
+            return Err(ToolError::validation(format!(
+                "Database row {} was not found in database {}.",
+                params.row_id, params.database_id
+            )));
         }
         let doc = collab_edit::fetch_collab_doc(
             &self.client,
@@ -616,7 +658,7 @@ impl AppServer {
     async fn appflowy_delete_row(
         &self,
         Parameters(request): Parameters<RowRefRequest>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         self.set_row_deleted(request, true).await
     }
 
@@ -627,7 +669,7 @@ impl AppServer {
     async fn appflowy_restore_row(
         &self,
         Parameters(request): Parameters<RowRefRequest>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         self.set_row_deleted(request, false).await
     }
 
@@ -638,19 +680,15 @@ impl AppServer {
     async fn appflowy_create_database_field(
         &self,
         Parameters(request): Parameters<CreateDatabaseFieldRequest>,
-    ) -> Result<Json<Value>, ErrorData> {
+    ) -> Result<Json<Value>, ToolError> {
         if request.name.is_empty() {
-            return Err(ErrorData::invalid_params(
-                "Field name must not be empty.",
-                None,
-            ));
+            return Err(ToolError::validation("Field name must not be empty."));
         }
         if !(0..=7).contains(&request.field_type) {
-            return Err(ErrorData::invalid_params(
+            return Err(ToolError::validation(
                 "field_type must be an AppFlowy field type id in 0..=7 \
                  (0=RichText, 1=Number, 2=DateTime, 3=SingleSelect, \
                  4=MultiSelect, 5=Checkbox, 6=URL, 7=Checklist).",
-                None,
             ));
         }
         let data = self
@@ -669,6 +707,122 @@ impl AppServer {
                     "field_type": request.field_type,
                     "type_option_data": request.type_option_data,
                 })),
+            )
+            .await
+            .map_err(map_tool_error)?;
+        Ok(Json(data))
+    }
+
+    #[tool(
+        name = "appflowy_list_database_history",
+        description = "List a database's version/checkpoint history (read-only; AppFlowy commercial cloud). Entries carry the version id and its timestamp, so they tell you which point a rollback would target; previewing a version's content and restoring from it are NOT supported. Pagination: `limit` (API default 30) plus an optional `since` (unix seconds) filter are sent directly; subsequent pages are addressed by echoing the response's next-cursor field back as the `cursor` query parameter — set fetch_all=true to follow it automatically and merge every page."
+    )]
+    async fn appflowy_list_database_history(
+        &self,
+        Parameters(request): Parameters<ListDatabaseHistoryRequest>,
+    ) -> Result<Json<Value>, ToolError> {
+        if request.workspace_id.is_empty() {
+            return Err(ToolError::validation("workspace_id is required."));
+        }
+        if request.database_id.is_empty() {
+            return Err(ToolError::validation("database_id is required."));
+        }
+        if let Some(limit) = request.limit {
+            if limit <= 0 {
+                return Err(ToolError::validation("limit must be greater than 0."));
+            }
+        }
+        let base_path = format!(
+            "/api/workspace/{}/database/{}/history",
+            request.workspace_id, request.database_id
+        );
+        let mut query: Vec<(&str, String)> = Vec::new();
+        if let Some(limit) = request.limit {
+            query.push(("limit", limit.to_string()));
+        }
+        if let Some(since) = request.since {
+            query.push(("since", since.to_string()));
+        }
+        let first_page = self
+            .client
+            .request(Method::GET, &base_path, Some(&query), None)
+            .await
+            .map_err(map_tool_error)?;
+        if !request.fetch_all.unwrap_or(false) {
+            return Ok(Json(first_page));
+        }
+        // Merging needs a recognized items array; unknown shapes fall back
+        // to the first page verbatim.
+        let mut merged = match history_page_items(&first_page) {
+            Some(items) => items,
+            None => return Ok(Json(first_page)),
+        };
+        let mut last_page = first_page;
+        let mut pages_fetched = 1usize;
+        while let Some(cursor) = history_next_cursor(&last_page) {
+            if pages_fetched >= MAX_HISTORY_PAGES {
+                break;
+            }
+            let mut page_query = query.clone();
+            page_query.push(("cursor", cursor));
+            let next_page = self
+                .client
+                .request(Method::GET, &base_path, Some(&page_query), None)
+                .await
+                .map_err(map_tool_error)?;
+            let Some(items) = history_page_items(&next_page) else {
+                break;
+            };
+            merged.extend(items);
+            last_page = next_page;
+            pages_fetched += 1;
+        }
+        // Keep the last page's envelope (its cursor state is the current one)
+        // and swap its items array for the merged list.
+        let mut result = last_page;
+        match &mut result {
+            Value::Array(_) => result = Value::Array(merged),
+            Value::Object(map) => {
+                if let Some(key) = ["data", "items", "history"]
+                    .into_iter()
+                    .find(|key| map.get(*key).is_some_and(Value::is_array))
+                {
+                    map.insert(key.to_string(), Value::Array(merged));
+                }
+                map.insert("pages_fetched".into(), json!(pages_fetched));
+            }
+            _ => {}
+        }
+        Ok(Json(result))
+    }
+
+    #[tool(
+        name = "appflowy_get_database_restore_state",
+        description = "Check whether a database is currently sitting on a history restore point (read-only; AppFlowy commercial cloud). Returns {database_restore_id, version}: both null when the database is at its live head; when set, the database was restored from that version of its history (see appflowy_list_database_history)."
+    )]
+    async fn appflowy_get_database_restore_state(
+        &self,
+        Parameters(request): Parameters<GetDatabaseRestoreStateRequest>,
+    ) -> Result<Json<Value>, ToolError> {
+        if request.workspace_id.is_empty() {
+            return Err(ToolError::validation("workspace_id is required."));
+        }
+        if request.database_id.is_empty() {
+            return Err(ToolError::validation("database_id is required."));
+        }
+        let data = self
+            .client
+            .request_ext(
+                Method::GET,
+                &format!(
+                    "/api/workspace/{}/database/{}/restore-state",
+                    request.workspace_id, request.database_id
+                ),
+                None,
+                None,
+                // The web client sends this so an in-flight restore is
+                // reflected instead of a cached state.
+                &[("Cache-Control", "no-cache")],
             )
             .await
             .map_err(map_tool_error)?;

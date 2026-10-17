@@ -17,16 +17,8 @@ use crate::delta::DeltaOp;
 // a hand-written scan in `split_table_row` instead of Rust `Regex`).
 // ---------------------------------------------------------------------------
 
-// Alternation priority: code > link > bold > strike > italic (same as Python).
-fn inline_pattern() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(
-            r"(?P<code>`[^`]+`)|(?P<link>\[[^\]]+\]\([^)]+\))|(?P<bold>\*\*[^*]+\*\*)|(?P<strike>~~[^~]+~~)|(?P<italic>\*[^*]+\*)",
-        )
-        .expect("INLINE_PATTERN must compile")
-    })
-}
+// The former single-alternation INLINE_PATTERN and link_detail_pattern were
+// replaced by the scanning tokenizer below (nested inline parsing).
 
 fn heading_pattern() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
@@ -50,13 +42,6 @@ fn inline_image_pattern() -> &'static Regex {
     RE.get_or_init(|| {
         Regex::new(r"!\[(?P<alt>[^\]]*)\]\((?P<url>[^)]+)\)")
             .expect("INLINE_IMAGE_PATTERN must compile")
-    })
-}
-
-fn link_detail_pattern() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(r"\[(?P<text>[^\]]+)\]\((?P<url>[^)]+)\)").expect("link pattern must compile")
     })
 }
 
@@ -112,69 +97,211 @@ impl Block {
 // Rich text
 // ---------------------------------------------------------------------------
 
-/// Split `text` into delta ops, recognizing inline code, links, bold,
-/// strikethrough, and italic markers (priority follows the alternation order
-/// of INLINE_PATTERN). Mirrors `parse_rich_text`.
+/// Split `text` into delta ops. A small scanning tokenizer recognizes
+/// `` `code` ``, `[text](url)`, `**bold**`, `~~strike~~`, and `*italic*`
+/// (in that priority order) at each position; container contents (bold,
+/// strike, italic, link text) are re-parsed recursively so nested inline
+/// formatting like `**[t](u)**` or `**a *b* c**` becomes ops whose
+/// attributes are the union of the enclosing and inner marks. Behavior
+/// notes (old single-alternation-regex parity unless listed otherwise):
+///
+/// - Marker candidates that fail to close are literal text — `**x`, `*x`,
+///   `` `x ``, `~~x`, `[x](`, `[]()` etc. pass through unchanged.
+/// - Opener must be followed by a non-marker char (mirrors `[^*]+` /
+///   `[^~]+`): `****` and `~~~~` stay literal.
+/// - A `*` pair that fails as `**bold**` falls back to literal `*` + a
+///   re-scan of the second star, matching the old regex's restart.
+/// - Repeated same-kind markers pair nearest-first ("先开先闭"):
+///   `*bold *inner* tail*` is italic("bold ") + "inner" + italic(" tail").
+///   A marker with mismatched kinds (`**a *b**`) now parses the outer
+///   container with the unpaired inner marker kept as literal text — new
+///   nesting capability the old regex refused.
+/// - `_underline_` emphasis is still NOT parsed (snake_case safety), same
+///   as the old pattern.
+/// - Backslash escapes: `\X` for X in {`\`, `` ` ``, `*`, `[`, `]`} yields
+///   literal X (this is the set the exporter escapes); any other `\X` keeps
+///   its backslash. Escapes are honored everywhere except code spans
+///   (verbatim) and link URLs (copied raw up to the first `)`).
 pub fn parse_rich_text(text: &str) -> Vec<DeltaOp> {
     if text.is_empty() {
         return vec![DeltaOp::plain("")];
     }
+    parse_inline(text, &Map::new())
+}
 
-    let mut deltas: Vec<DeltaOp> = Vec::new();
-    let mut last_end = 0usize;
+/// Characters import un-escapes after a backslash. Kept in sync with
+/// `crate::render::escape_inline` — the exporter escapes exactly this set.
+fn is_escapable(b: u8) -> bool {
+    matches!(b, b'\\' | b'`' | b'*' | b'[' | b']')
+}
 
-    for caps in inline_pattern().captures_iter(text) {
-        let m = match caps.get(0) {
-            Some(m) => m,
-            None => continue,
-        };
-        let (start, end) = (m.start(), m.end());
-        if start > last_end {
-            deltas.push(DeltaOp::plain(&text[last_end..start]));
+/// Next index of `marker` at or after `from`, treating `\X` (X escapable)
+/// as literal text rather than a marker.
+fn find_unescaped(text: &str, from: usize, marker: u8, pair: bool) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut i = from;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' && i + 1 < bytes.len() && is_escapable(bytes[i + 1]) {
+            i += 2;
+            continue;
         }
+        if bytes[i] == marker && (!pair || bytes.get(i + 1) == Some(&marker)) {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
 
-        let value = m.as_str();
-        let mut attributes: Map<String, Value> = Map::new();
-        let mut content = value;
+/// `` `...` ``: the first following backtick closes the span and the content
+/// must be non-empty (the old `[^`]+` rule). Verbatim: no escapes, no marks
+/// inside. Returns (content, end-exclusive).
+fn try_code(text: &str, start: usize) -> Option<(&str, usize)> {
+    let offset = text[start + 1..].find('`').filter(|off| *off > 0)?;
+    Some((&text[start + 1..start + 1 + offset], start + 2 + offset))
+}
 
-        // Python uses match.lastgroup; here we check the named groups. The
-        // check order matches the alternation priority, though at most one
-        // group participates per match.
-        if caps.name("code").is_some() {
-            content = &value[1..value.len() - 1];
-            attributes.insert("code".to_string(), json!(true));
-        } else if caps.name("link").is_some() {
-            if let Some(link) = link_detail_pattern().captures(value) {
-                if let (Some(t), Some(u)) = (link.name("text"), link.name("url")) {
-                    content = t.as_str();
-                    attributes.insert("href".to_string(), json!(u.as_str()));
+/// `[text](url)`: the text runs to the first un-escaped `]` and must be
+/// non-empty (`\]` may appear inside); the URL is the non-empty run up to
+/// the first raw `)` — a literal `)` inside a URL is not representable,
+/// same as the old `[^)]+` pattern. Returns (text, url, end-exclusive).
+fn try_link(text: &str, start: usize) -> Option<(&str, &str, usize)> {
+    let close = find_unescaped(text, start + 1, b']', false)?;
+    if close == start + 1 || text.as_bytes().get(close + 1) != Some(&b'(') {
+        return None;
+    }
+    let url_start = close + 2;
+    let url_end = url_start + text[url_start..].find(')')?;
+    if url_end == url_start {
+        return None;
+    }
+    Some((
+        &text[start + 1..close],
+        &text[url_start..url_end],
+        url_end + 1,
+    ))
+}
+
+/// `(...)...(...)` style container (`**bold**`, `*italic*`, `~~strike~~`):
+/// the opener must be followed by a non-marker char and a matching closer
+/// must exist. Returns (content, end-exclusive).
+fn try_container(text: &str, start: usize, marker: u8, width: usize) -> Option<(&str, usize)> {
+    let content_start = start + width;
+    match text.as_bytes().get(content_start) {
+        Some(&b) if b != marker => {}
+        _ => return None,
+    }
+    let pair = width == 2;
+    let end = find_unescaped(text, content_start + 1, marker, pair)?;
+    Some((&text[content_start..end], end + width))
+}
+
+/// Recursive body of [`parse_rich_text`]: every op emitted here carries the
+/// container attributes in `extra` merged with the marks found at this
+/// level. The merge order mirrors `render::delta_to_markdown`'s wrapping
+/// (code -> bold -> italic -> strike -> href from the inside out), which is
+/// what makes export-then-import stable.
+fn parse_inline(text: &str, extra: &Map<String, Value>) -> Vec<DeltaOp> {
+    let mut ops: Vec<DeltaOp> = Vec::new();
+    let mut plain = String::new();
+    let bytes = text.as_bytes();
+    let mut i = 0usize;
+
+    let flush = |ops: &mut Vec<DeltaOp>, plain: &mut String| {
+        if !plain.is_empty() {
+            let text = std::mem::take(plain);
+            ops.push(if extra.is_empty() {
+                DeltaOp::plain(text)
+            } else {
+                DeltaOp::with_attributes(text, extra.clone())
+            });
+        }
+    };
+    let push_op = |ops: &mut Vec<DeltaOp>, insert: &str, key: &str, value: Value| {
+        let mut attrs = extra.clone();
+        attrs.insert(key.to_string(), value);
+        ops.push(if attrs.is_empty() {
+            DeltaOp::plain(insert)
+        } else {
+            DeltaOp::with_attributes(insert, attrs)
+        });
+    };
+
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'\\' && i + 1 < bytes.len() && is_escapable(bytes[i + 1]) {
+            // Recognized escape: literal X, drop the backslash.
+            plain.push(bytes[i + 1] as char);
+            i += 2;
+            continue;
+        }
+        match b {
+            b'`' => match try_code(text, i) {
+                Some((content, end)) => {
+                    flush(&mut ops, &mut plain);
+                    push_op(&mut ops, content, "code", json!(true));
+                    i = end;
+                }
+                None => {
+                    plain.push('`');
+                    i += 1;
+                }
+            },
+            b'[' => match try_link(text, i) {
+                Some((link_text, url, end)) => {
+                    flush(&mut ops, &mut plain);
+                    let mut attrs = extra.clone();
+                    attrs.insert("href".to_string(), json!(url));
+                    ops.extend(parse_inline(link_text, &attrs));
+                    i = end;
+                }
+                None => {
+                    plain.push('[');
+                    i += 1;
+                }
+            },
+            b'*' => {
+                let pair = bytes.get(i + 1) == Some(&b'*');
+                let (width, key) = if pair { (2, "bold") } else { (1, "italic") };
+                match try_container(text, i, b'*', width) {
+                    Some((content, end)) => {
+                        flush(&mut ops, &mut plain);
+                        let mut attrs = extra.clone();
+                        attrs.insert(key.to_string(), json!(true));
+                        ops.extend(parse_inline(content, &attrs));
+                        i = end;
+                    }
+                    // On a failed `**` only the first star goes literal; the
+                    // second is re-examined (it may still open italic).
+                    None => {
+                        plain.push('*');
+                        i += 1;
+                    }
                 }
             }
-        } else if caps.name("bold").is_some() {
-            content = &value[2..value.len() - 2];
-            attributes.insert("bold".to_string(), json!(true));
-        } else if caps.name("strike").is_some() {
-            content = &value[2..value.len() - 2];
-            attributes.insert("strikethrough".to_string(), json!(true));
-        } else if caps.name("italic").is_some() {
-            content = &value[1..value.len() - 1];
-            attributes.insert("italic".to_string(), json!(true));
+            b'~' if bytes.get(i + 1) == Some(&b'~') => match try_container(text, i, b'~', 2) {
+                Some((content, end)) => {
+                    flush(&mut ops, &mut plain);
+                    let mut attrs = extra.clone();
+                    attrs.insert("strikethrough".to_string(), json!(true));
+                    ops.extend(parse_inline(content, &attrs));
+                    i = end;
+                }
+                None => {
+                    plain.push('~');
+                    i += 1;
+                }
+            },
+            // Non-ASCII bytes are UTF-8 sequences; step by whole chars.
+            _ => {
+                let ch = text[i..].chars().next().expect("non-empty tail");
+                plain.push(ch);
+                i += ch.len_utf8();
+            }
         }
-
-        let delta = if attributes.is_empty() {
-            DeltaOp::plain(content)
-        } else {
-            DeltaOp::with_attributes(content, attributes)
-        };
-        deltas.push(delta);
-        last_end = end;
     }
-
-    if last_end < text.len() {
-        deltas.push(DeltaOp::plain(&text[last_end..]));
-    }
-
-    deltas
+    flush(&mut ops, &mut plain);
+    ops
 }
 
 // ---------------------------------------------------------------------------

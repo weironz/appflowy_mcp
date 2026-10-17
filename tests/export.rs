@@ -8,7 +8,9 @@ use std::collections::HashMap;
 
 use serde_json::{json, Value};
 use yrs::types::Attrs;
-use yrs::{Any, ArrayPrelim, Doc, Map, MapPrelim, ReadTxn, StateVector, Text, TextPrelim, Transact};
+use yrs::{
+    Any, ArrayPrelim, Doc, Map, MapPrelim, ReadTxn, StateVector, Text, TextPrelim, Transact,
+};
 
 use appflowy_mcp::collab::{decode_document, BlockEntry, Document};
 use appflowy_mcp::delta::DeltaOp;
@@ -26,7 +28,12 @@ struct Spec {
 }
 
 fn spec(ty: &'static str, data: Value, delta: Option<Vec<DeltaOp>>, kids: Vec<Spec>) -> Spec {
-    Spec { ty, data, delta, kids }
+    Spec {
+        ty,
+        data,
+        delta,
+        kids,
+    }
 }
 
 /// Build a decoded `Document` from (ty, data, text_delta, children) specs.
@@ -74,7 +81,13 @@ fn make_document(specs: Vec<Spec>) -> Document {
     }
 
     for spec in specs {
-        add(spec, "c_root", &mut blocks, &mut children_map, &mut text_map);
+        add(
+            spec,
+            "c_root",
+            &mut blocks,
+            &mut children_map,
+            &mut text_map,
+        );
     }
     Document {
         page_id: "root".to_string(),
@@ -139,24 +152,59 @@ fn test_delta_stacked_attributes_wrap_in_python_order() {
 #[test]
 fn test_document_to_markdown_block_types() {
     let doc = make_document(vec![
-        spec("heading", json!({"level": 2}), Some(vec![DeltaOp::plain("Head")]), vec![]),
-        spec("paragraph", json!({}), Some(vec![DeltaOp::plain("para")]), vec![]),
+        spec(
+            "heading",
+            json!({"level": 2}),
+            Some(vec![DeltaOp::plain("Head")]),
+            vec![],
+        ),
+        spec(
+            "paragraph",
+            json!({}),
+            Some(vec![DeltaOp::plain("para")]),
+            vec![],
+        ),
         spec(
             "bulleted_list",
             json!({}),
             Some(vec![DeltaOp::plain("item")]),
-            vec![spec("bulleted_list", json!({}), Some(vec![DeltaOp::plain("nested")]), vec![])],
+            vec![spec(
+                "bulleted_list",
+                json!({}),
+                Some(vec![DeltaOp::plain("nested")]),
+                vec![],
+            )],
         ),
-        spec("numbered_list", json!({}), Some(vec![DeltaOp::plain("one")]), vec![]),
-        spec("numbered_list", json!({}), Some(vec![DeltaOp::plain("two")]), vec![]),
+        spec(
+            "numbered_list",
+            json!({}),
+            Some(vec![DeltaOp::plain("one")]),
+            vec![],
+        ),
+        spec(
+            "numbered_list",
+            json!({}),
+            Some(vec![DeltaOp::plain("two")]),
+            vec![],
+        ),
         spec(
             "todo_list",
             json!({"checked": true}),
             Some(vec![DeltaOp::plain("done")]),
             vec![],
         ),
-        spec("quote", json!({}), Some(vec![DeltaOp::plain("quoted")]), vec![]),
-        spec("code", json!({"language": "python"}), Some(vec![DeltaOp::plain("print(1)")]), vec![]),
+        spec(
+            "quote",
+            json!({}),
+            Some(vec![DeltaOp::plain("quoted")]),
+            vec![],
+        ),
+        spec(
+            "code",
+            json!({"language": "python"}),
+            Some(vec![DeltaOp::plain("print(1)")]),
+            vec![],
+        ),
         spec("divider", json!({}), None, vec![]),
         spec(
             "image",
@@ -187,14 +235,37 @@ fn test_unsupported_block_marked_on_export() {
 #[test]
 fn test_simple_table_rendered_as_gfm() {
     fn cell(t: &str) -> Spec {
-        spec("simple_table_cell", json!({}), None, vec![
-            spec("paragraph", json!({}), Some(vec![DeltaOp::plain(t)]), vec![]),
-        ])
+        spec(
+            "simple_table_cell",
+            json!({}),
+            None,
+            vec![spec(
+                "paragraph",
+                json!({}),
+                Some(vec![DeltaOp::plain(t)]),
+                vec![],
+            )],
+        )
     }
-    let table = spec("simple_table", json!({}), None, vec![
-        spec("simple_table_row", json!({}), None, vec![cell("A"), cell("B")]),
-        spec("simple_table_row", json!({}), None, vec![cell("1"), cell("2")]),
-    ]);
+    let table = spec(
+        "simple_table",
+        json!({}),
+        None,
+        vec![
+            spec(
+                "simple_table_row",
+                json!({}),
+                None,
+                vec![cell("A"), cell("B")],
+            ),
+            spec(
+                "simple_table_row",
+                json!({}),
+                None,
+                vec![cell("1"), cell("2")],
+            ),
+        ],
+    );
     let out = document_to_markdown(&make_document(vec![table]), None);
     assert!(out.contains("| A | B |"));
     assert!(out.contains("| --- | --- |"));
@@ -205,14 +276,32 @@ fn test_simple_table_rendered_as_gfm() {
 #[test]
 fn test_simple_table_pipes_and_short_rows() {
     fn cell(t: &str) -> Spec {
-        spec("simple_table_cell", json!({}), None, vec![
-            spec("paragraph", json!({}), Some(vec![DeltaOp::plain(t)]), vec![]),
-        ])
+        spec(
+            "simple_table_cell",
+            json!({}),
+            None,
+            vec![spec(
+                "paragraph",
+                json!({}),
+                Some(vec![DeltaOp::plain(t)]),
+                vec![],
+            )],
+        )
     }
-    let table = spec("simple_table", json!({}), None, vec![
-        spec("simple_table_row", json!({}), None, vec![cell("a|b"), cell("x")]),
-        spec("simple_table_row", json!({}), None, vec![cell("1")]), // short row padded
-    ]);
+    let table = spec(
+        "simple_table",
+        json!({}),
+        None,
+        vec![
+            spec(
+                "simple_table_row",
+                json!({}),
+                None,
+                vec![cell("a|b"), cell("x")],
+            ),
+            spec("simple_table_row", json!({}), None, vec![cell("1")]), // short row padded
+        ],
+    );
     let out = document_to_markdown(&make_document(vec![table]), None);
     assert!(out.contains("| a\\|b | x |"));
     assert!(out.contains("| 1 |  |"));
@@ -220,9 +309,12 @@ fn test_simple_table_pipes_and_short_rows() {
 
 #[test]
 fn test_math_equation_rendered() {
-    let doc = make_document(vec![
-        spec("math_equation", json!({"formula": "E=mc^2"}), None, vec![]),
-    ]);
+    let doc = make_document(vec![spec(
+        "math_equation",
+        json!({"formula": "E=mc^2"}),
+        None,
+        vec![],
+    )]);
     let out = document_to_markdown(&doc, None);
     assert!(out.contains("$$") && out.contains("E=mc^2"));
 }
@@ -286,7 +378,15 @@ fn test_decode_document_roundtrip() {
     document.insert(&mut txn, "page_id", "root");
 
     let blocks = document.insert(&mut txn, "blocks", MapPrelim::default());
-    insert_block(&blocks, &mut txn, "root", "page", "{}", Some("c_root"), None);
+    insert_block(
+        &blocks,
+        &mut txn,
+        "root",
+        "page",
+        "{}",
+        Some("c_root"),
+        None,
+    );
     insert_block(
         &blocks,
         &mut txn,
@@ -328,7 +428,9 @@ fn test_decode_document_roundtrip() {
     );
 
     drop(txn);
-    let update = doc.transact().encode_state_as_update_v1(&StateVector::default());
+    let update = doc
+        .transact()
+        .encode_state_as_update_v1(&StateVector::default());
 
     let decoded = decode_document(&update).expect("decode");
     assert_eq!(decoded.page_id, "root");
@@ -350,7 +452,10 @@ fn test_decode_document_roundtrip() {
     assert_eq!(decoded.text_map["t_b1"], vec![DeltaOp::plain("Head")]);
     assert_eq!(decoded.text_map["t_b2"].len(), 3);
     assert_eq!(decoded.text_map["t_b2"][0], DeltaOp::plain("plain "));
-    assert_eq!(decoded.text_map["t_b2"][1], DeltaOp::with_attributes("bold", bold_attrs()));
+    assert_eq!(
+        decoded.text_map["t_b2"][1],
+        DeltaOp::with_attributes("bold", bold_attrs())
+    );
     assert_eq!(decoded.text_map["t_b2"][2].insert, "link");
 
     // The decoded document renders with inline formatting preserved.
@@ -382,7 +487,9 @@ fn test_decode_block_defaults_and_bad_json() {
     meta.insert(&mut txn, "children_map", MapPrelim::default());
 
     drop(txn);
-    let update = doc.transact().encode_state_as_update_v1(&StateVector::default());
+    let update = doc
+        .transact()
+        .encode_state_as_update_v1(&StateVector::default());
 
     let decoded = decode_document(&update).expect("decode");
     let root = &decoded.blocks["root"];
@@ -407,8 +514,24 @@ fn test_decode_plain_string_text_map() {
     let document = data.insert(&mut txn, "document", MapPrelim::default());
     document.insert(&mut txn, "page_id", "root");
     let blocks = document.insert(&mut txn, "blocks", MapPrelim::default());
-    insert_block(&blocks, &mut txn, "root", "page", "{}", Some("c_root"), None);
-    insert_block(&blocks, &mut txn, "b1", "paragraph", "{}", None, Some("t_b1"));
+    insert_block(
+        &blocks,
+        &mut txn,
+        "root",
+        "page",
+        "{}",
+        Some("c_root"),
+        None,
+    );
+    insert_block(
+        &blocks,
+        &mut txn,
+        "b1",
+        "paragraph",
+        "{}",
+        None,
+        Some("t_b1"),
+    );
 
     let meta = document.insert(&mut txn, "meta", MapPrelim::default());
     let children_map = meta.insert(&mut txn, "children_map", MapPrelim::default());
@@ -420,7 +543,9 @@ fn test_decode_plain_string_text_map() {
     text_map.insert(&mut txn, "t_empty", ""); // falsy -> []
 
     drop(txn);
-    let update = doc.transact().encode_state_as_update_v1(&StateVector::default());
+    let update = doc
+        .transact()
+        .encode_state_as_update_v1(&StateVector::default());
 
     let decoded = decode_document(&update).expect("decode");
     assert_eq!(decoded.text_map["t_b1"], vec![DeltaOp::plain("flat text")]);
@@ -449,14 +574,27 @@ fn test_decode_invalid_update_errors() {
 fn test_export_reimports_cleanly() {
     use appflowy_mcp::markdown::parse_markdown_to_blocks;
     let doc = make_document(vec![
-        spec("heading", json!({"level": 1}), Some(vec![DeltaOp::plain("H")]), vec![]),
+        spec(
+            "heading",
+            json!({"level": 1}),
+            Some(vec![DeltaOp::plain("H")]),
+            vec![],
+        ),
         spec(
             "paragraph",
             json!({}),
-            Some(vec![DeltaOp::plain("body "), DeltaOp::with_attributes("bold", bold_attrs())]),
+            Some(vec![
+                DeltaOp::plain("body "),
+                DeltaOp::with_attributes("bold", bold_attrs()),
+            ]),
             vec![],
         ),
-        spec("todo_list", json!({"checked": false}), Some(vec![DeltaOp::plain("task")]), vec![]),
+        spec(
+            "todo_list",
+            json!({"checked": false}),
+            Some(vec![DeltaOp::plain("task")]),
+            vec![],
+        ),
     ]);
     let md = document_to_markdown(&doc, None);
     let blocks = parse_markdown_to_blocks(&md, None);
@@ -496,7 +634,15 @@ fn collab_update(texts: &[&str]) -> Vec<u8> {
     let document = data.insert(&mut txn, "document", MapPrelim::default());
     document.insert(&mut txn, "page_id", "root");
     let blocks = document.insert(&mut txn, "blocks", MapPrelim::default());
-    insert_block(&blocks, &mut txn, "root", "page", "{}", Some("c_root"), None);
+    insert_block(
+        &blocks,
+        &mut txn,
+        "root",
+        "page",
+        "{}",
+        Some("c_root"),
+        None,
+    );
     let ids: Vec<String> = (0..texts.len()).map(|i| format!("b{i}")).collect();
     for id in &ids {
         insert_block(
@@ -523,7 +669,9 @@ fn collab_update(texts: &[&str]) -> Vec<u8> {
     }
 
     drop(txn);
-    let update = doc.transact().encode_state_as_update_v1(&StateVector::default());
+    let update = doc
+        .transact()
+        .encode_state_as_update_v1(&StateVector::default());
     update
 }
 
@@ -569,8 +717,9 @@ async fn mock_collab_not_found(server: &MockServer) -> httpmock::Mock<'_> {
     server
         .mock_async(|when, then| {
             when.method(GET).path("/api/workspace/ws/page-view/vid");
-            then.status(404)
-                .json_body(json!({"code": -2, "message": "Record not found:Collab not found (code -2)"}));
+            then.status(404).json_body(
+                json!({"code": -2, "message": "Record not found:Collab not found (code -2)"}),
+            );
         })
         .await
 }
@@ -594,7 +743,8 @@ async fn fetch_page_markdown_retries_on_collab_not_found() {
     let ok = server
         .mock_async(move |when, then| {
             when.method(GET).path(path);
-            then.status(200).json_body(page_view_body(&collab_update(&["body"])));
+            then.status(200)
+                .json_body(page_view_body(&collab_update(&["body"])));
         })
         .await;
 
@@ -614,7 +764,8 @@ async fn fetch_page_markdown_retries_on_empty_body() {
     let empty = server
         .mock_async(|when, then| {
             when.method(GET).path("/api/workspace/ws/page-view/vid");
-            then.status(200).json_body(page_view_body(&collab_update(&[])));
+            then.status(200)
+                .json_body(page_view_body(&collab_update(&[])));
         })
         .await;
     let client = httpmock_client(&server).await;
@@ -628,7 +779,8 @@ async fn fetch_page_markdown_retries_on_empty_body() {
     let full = server
         .mock_async(|when, then| {
             when.method(GET).path("/api/workspace/ws/page-view/vid");
-            then.status(200).json_body(page_view_body(&collab_update(&["body"])));
+            then.status(200)
+                .json_body(page_view_body(&collab_update(&["body"])));
         })
         .await;
 
@@ -685,8 +837,9 @@ async fn page_markdown_falls_back_to_raw_collab() {
     let page_view = server
         .mock_async(|when, then| {
             when.method(GET).path("/api/workspace/ws/page-view/vid");
-            then.status(404)
-                .json_body(json!({"code": -2, "message": "Record not found:Collab not found (code -2)"}));
+            then.status(404).json_body(
+                json!({"code": -2, "message": "Record not found:Collab not found (code -2)"}),
+            );
         })
         .await;
     let collab = server
@@ -761,7 +914,9 @@ async fn export_prefetches_and_writes_directory() {
         assert!(path.is_file(), "missing {}", path.display());
     }
     assert!(std::fs::read_to_string(&doc1).unwrap().contains("body-d1"));
-    assert!(std::fs::read_to_string(&readme).unwrap().contains("body-f1"));
+    assert!(std::fs::read_to_string(&readme)
+        .unwrap()
+        .contains("body-f1"));
     assert!(std::fs::read_to_string(&doc2).unwrap().contains("body-d2"));
     assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
     assert_eq!(exported.len(), 3);
@@ -770,4 +925,124 @@ async fn export_prefetches_and_writes_directory() {
         mock.assert_calls_async(1).await;
     }
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Inline escaping + tokenizer round-trips (Markdown fidelity work).
+// ---------------------------------------------------------------------------
+
+fn attrs(pairs: &[(&str, Value)]) -> serde_json::Map<String, Value> {
+    serde_json::Map::from_iter(pairs.iter().map(|(k, v)| (k.to_string(), v.clone())))
+}
+
+#[test]
+fn test_delta_escapes_plain_metacharacters() {
+    use appflowy_mcp::markdown::parse_rich_text;
+    // Plain text containing literal metacharacters is backslash-escaped so it
+    // re-imports as the same characters instead of formatting.
+    let delta = vec![DeltaOp::plain("a*b [c] `d` \\e")];
+    let md = delta_to_markdown(&delta);
+    assert_eq!(md, "a\\*b \\[c\\] \\`d\\` \\\\e");
+    assert_eq!(parse_rich_text(&md), delta);
+    // `|` is NOT escaped here — that is the table-cell rule's job.
+    let delta = vec![DeltaOp::plain("a|b")];
+    assert_eq!(delta_to_markdown(&delta), "a|b");
+}
+
+#[test]
+fn test_delta_code_span_is_not_escaped_or_reparsed() {
+    use appflowy_mcp::markdown::parse_rich_text;
+    // Code span content is verbatim on both sides: marks and escapes inside
+    // stay literal, and re-importing parses none of them.
+    let delta = vec![DeltaOp::with_attributes(
+        "a*b [c]",
+        attrs(&[("code", json!(true))]),
+    )];
+    let md = delta_to_markdown(&delta);
+    assert_eq!(md, "`a*b [c]`");
+    assert_eq!(parse_rich_text(&md), delta);
+    let delta = vec![DeltaOp::with_attributes(
+        "a\\*`b",
+        attrs(&[("code", json!(true))]),
+    )];
+    assert_eq!(delta_to_markdown(&delta), "`a\\*`b`");
+}
+
+#[test]
+fn test_nested_bold_strike_roundtrip() {
+    use appflowy_mcp::markdown::parse_rich_text;
+    // Wrapping order code->bold->italic->strike->href puts strike outside
+    // bold for a same-span combination; parsing must re-merge the nesting.
+    let delta = vec![DeltaOp::with_attributes(
+        "x",
+        attrs(&[("bold", json!(true)), ("strikethrough", json!(true))]),
+    )];
+    let md = delta_to_markdown(&delta);
+    assert_eq!(md, "~~**x**~~");
+    assert_eq!(parse_rich_text(&md), delta);
+    // The reverse nesting (`**~~x~~**`) imports to the same merged op.
+    assert_eq!(parse_rich_text("**~~x~~**"), delta);
+}
+
+#[test]
+fn test_bold_wrapping_link_roundtrip() {
+    use appflowy_mcp::markdown::parse_rich_text;
+    // A bold link is exported href-outside (`[**t**](u)`); both wrap orders
+    // import to the same op.
+    let delta = vec![DeltaOp::with_attributes(
+        "t",
+        attrs(&[("bold", json!(true)), ("href", json!("https://u.example"))]),
+    )];
+    let md = delta_to_markdown(&delta);
+    assert_eq!(md, "[**t**](https://u.example)");
+    assert_eq!(parse_rich_text(&md), delta);
+    assert_eq!(parse_rich_text("**[t](https://u.example)**"), delta);
+}
+
+#[test]
+fn test_table_cell_pipes_roundtrip() {
+    use appflowy_mcp::markdown::parse_markdown_to_blocks;
+    // Pipes inside a header cell are escaped on export and unescaped on
+    // import (table rule, not the inline escape set).
+    fn cell(t: &str) -> Spec {
+        spec(
+            "simple_table_cell",
+            json!({}),
+            None,
+            vec![spec(
+                "paragraph",
+                json!({}),
+                Some(vec![DeltaOp::plain(t)]),
+                vec![],
+            )],
+        )
+    }
+    let table = spec(
+        "simple_table",
+        json!({}),
+        None,
+        vec![
+            spec(
+                "simple_table_row",
+                json!({}),
+                None,
+                vec![cell("A|B"), cell("a*b")],
+            ),
+            spec(
+                "simple_table_row",
+                json!({}),
+                None,
+                vec![cell("1"), cell("2")],
+            ),
+        ],
+    );
+    let md = document_to_markdown(&make_document(vec![table]), None);
+    assert!(md.contains("| A\\|B | a\\*b |"), "{md}");
+    let blocks = parse_markdown_to_blocks(&md, None);
+    assert_eq!(blocks[0].ty, "simple_table");
+    let header = &blocks[0].children[0];
+    let cell_text =
+        |idx: usize| header.children[idx].children[0].data["delta"][0]["insert"].clone();
+    assert_eq!(cell_text(0), json!("A|B"));
+    assert_eq!(cell_text(1), json!("a*b"));
 }
