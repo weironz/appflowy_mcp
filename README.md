@@ -1,6 +1,6 @@
 # AppFlowy MCP
 
-An MCP server and CLI for [AppFlowy](https://github.com/appflowy-io/appflowy) with 81 tools covering workspaces, spaces, pages, page content, Markdown import and export, databases, rows, search, members and invitations, publishing, quick notes, file upload, and AI chat.
+An MCP server and CLI for [AppFlowy](https://github.com/appflowy-io/appflowy) with 114 tools covering workspaces, spaces, pages, page content, Markdown import and export, PDF/ZIP export, databases, rows, CSV/document import, search, members and invitations, page sharing, document comments, publishing, quick notes, notifications, file upload (incl. multipart), and AI chat & meeting transcription.
 
 Since v0.8.0 the implementation is a single self-contained **Rust binary** — no Python or runtime dependencies. This repository *is* the Rust project (standard cargo layout); the original Python implementation was removed after the rewrite (see [Legacy Python](#legacy-python-implementation)).
 
@@ -76,7 +76,7 @@ appflowy serve --http 127.0.0.1:8000                # endpoint: http://127.0.0.1
 appflowy serve --http 0.0.0.0:8000 --allow-remote   # beyond loopback (read below)
 ```
 
-Point HTTP-capable clients at `http://ADDR/mcp` (legacy session-mode clients and the newer stateless protocol are both negotiated automatically). Two guardrails are on by default: only loopback `Host` authorities are accepted (DNS-rebinding protection), and requests carrying a browser `Origin` are rejected. Binding a non-loopback address requires `--allow-remote`, which also disables the loopback host allowlist — do that only on a trusted network, because any reachable client can then drive all 81 tools with the server's AppFlowy credentials.
+Point HTTP-capable clients at `http://ADDR/mcp` (legacy session-mode clients and the newer stateless protocol are both negotiated automatically). Two guardrails are on by default: only loopback `Host` authorities are accepted (DNS-rebinding protection), and requests carrying a browser `Origin` are rejected. Binding a non-loopback address requires `--allow-remote`, which also disables the loopback host allowlist — do that only on a trusted network, because any reachable client can then drive all 114 tools with the server's AppFlowy credentials.
 
 ## Environment Variables
 
@@ -300,9 +300,14 @@ Example single-file import:
 - `appflowy_export_space`
 - `appflowy_export_workspace`
 
-AppFlowy-Cloud has no export REST endpoint (the desktop app exports client-side), so these tools rebuild Markdown from the page collab data. The raw yjs update returned by the page-view endpoint is decoded natively in Rust ([yrs](https://github.com/y-crdt/y-crdt), the reference implementation of Yjs), which preserves inline formatting (bold, italic, strikethrough, inline code, links) that the server's JSON conversion would flatten.
+For Markdown there is no server-side export format, so these tools rebuild it from the page collab data. The raw yjs update returned by the page-view endpoint is decoded natively in Rust ([yrs](https://github.com/y-crdt/y-crdt), the reference implementation of Yjs), which preserves inline formatting (bold, italic, strikethrough, inline code, links) that the server's JSON conversion would flatten.
 
 `appflowy_export_page` writes one page to a local `.md` file. `appflowy_export_space` exports a space (or any page subtree) as a directory tree that mirrors the import convention — a page with children becomes a folder whose own content is `README.md`, leaf pages become `.md` files. `appflowy_export_workspace` does the same for every space in the workspace. Page Markdown is prefetched concurrently (bounded at 8 workers) with per-page retry and fallback to the raw collab endpoint; pages that still fail are reported as warnings with full attempt traces instead of aborting the run. Non-document views (grids, boards, calendars) are skipped and reported in warnings, and the destination directory must be empty so existing files are never overwritten.
+
+### Server-Side Export (PDF / ZIP)
+
+- `appflowy_export_pdf` — newer commercial-cloud endpoint that renders a page (with nesting, databases and images) to PDF on the server and downloads the bytes to a local path; filename is recovered from `Content-Disposition` (RFC 6266). Higher fidelity than the Markdown rebuild for print/share use cases.
+- `appflowy_export_workspace_zip` — owner-only full-workspace backup: returns a `task_id`; the server builds the ZIP asynchronously (with optional file attachments) and emails the owner a download link.
 
 ### Databases And Rows
 
@@ -360,19 +365,75 @@ Quick note tools accept plain `text` (converted to paragraph blocks) or raw `dat
 
 Create a chat with `appflowy_create_chat` (optionally passing `rag_ids`, page view ids the AI may use as context), then ask questions with `appflowy_chat_ask`, which posts the question and waits for the complete AI answer (non-streaming).
 
+### AI Meeting Transcription
+
+- `appflowy_meeting_transcribe`
+- `appflowy_meeting_get_transcript`
+- `appflowy_meeting_get_paragraphs`
+- `appflowy_meeting_delete_transcript`
+- `appflowy_meeting_usage`
+
+`appflowy_meeting_transcribe` accepts a local audio file (uploaded via a presigned storage URL — the AppFlowy bearer token is never sent to storage) or an existing audio URL, then submits it for AI transcription returns a full transcript with empty text only when the audio is silent. Poll `appflowy_meeting_get_transcript` (status `queued` → `processing` → `completed`/`error`), then fetch speaker-labeled paragraphs with word-level timestamps.
+
+### Document Comments
+
+- `appflowy_list_inline_comments`
+- `appflowy_add_inline_comment`
+- `appflowy_resolve_inline_comment`
+- `appflowy_delete_inline_comment`
+- `appflowy_list_inline_comment_reactions`
+- `appflowy_add_inline_comment_reaction`
+- `appflowy_delete_inline_comment_reaction`
+- `appflowy_notify_row_comment`
+
+Inline annotations on a document page (distinct from published-page public comments) — the read/review loop for human-AI collaboration: an agent writes content, a reviewer leaves and resolves comments in the document. Deletion is a soft delete server-side (`is_deleted: true`); the v2 create endpoint falls back to the legacy one on older deployments (404/405).
+
+### Page Sharing
+
+- `appflowy_share_page`
+- `appflowy_revoke_page_access`
+- `appflowy_get_page_access_details`
+- `appflowy_request_access`
+- `appflowy_get_access_request`
+- `appflowy_approve_access_request`
+- `appflowy_list_shared_with_me`
+
+Share a page with collaborators by email at an access level — `10` ReadOnly, `20` ReadAndComment, `30` ReadAndWrite, `50` FullAccess (verified against AppFlowy-Web's `AccessLevel` enum). `appflowy_get_page_access_details` uses the v2 endpoint with a structured-404 fallback to the legacy ancestor-walk variant. Distinct from publishing: sharing grants named accounts in-app access, publishing exposes a public link.
+
+### CSV / Document Import
+
+- `appflowy_import_csv`
+- `appflowy_get_csv_import_status`
+- `appflowy_cancel_csv_import`
+- `appflowy_import_document`
+- `appflowy_get_document_import_status`
+
+`appflowy_import_csv` creates/appends/replaces a database (grid, board or calendar) from a local CSV with dialect options (header, delimiter, quote, encoding). `appflowy_import_document` converts a local `.doc`/`.docx`/`.html`/`.pdf` file into a Document page under `parent_view_id`. Both are asynchronous server-side tasks (presigned upload, then poll the status tools).
+
+### Notifications
+
+- `appflowy_list_notifications`
+- `appflowy_get_unread_count`
+- `appflowy_mark_notifications_read`
+- `appflowy_mark_all_notifications_read`
+- `appflowy_archive_notifications`
+- `appflowy_archive_all_notifications`
+
+The workspace notification inbox (comments, mentions, share invitations) — the way for an agent to watch collaboration events.
+
 ### User And Files
 
 - `appflowy_get_user_profile`
 - `appflowy_upload_file`
 
-`appflowy_upload_file` uploads a local file to AppFlowy file storage and returns a URL that image or file blocks can reference. Use the page `view_id` as `parent_dir`.
+`appflowy_upload_file` uploads a local file to AppFlowy file storage and returns a URL that image or file blocks can reference. Use the page `view_id` as `parent_dir`. Files of 5 MB and above upload automatically as multipart chunks (concurrent parts with retries, aborted cleanly on failure); smaller files use the single-shot upload.
 
 ## Legacy Python Implementation
 
 The original Python implementation (`appflowy_mcp/` and `appflowy-cli/`) was **deprecated in v0.8.0 and has since been removed from this repository** — check out tag `v0.8.0` if you need the Python sources. The Rust binary is the only implementation going forward.
 
 - PyPI packages [`appflowy-mcp`](https://pypi.org/project/appflowy-mcp/) (final: **0.8.0**) and [`appflowy-cli`](https://pypi.org/project/appflowy-cli/) (final: **0.6.4**) remain installable but receive no further updates — the release workflow no longer publishes to PyPI.
-- The Rust implementation is behavior-compatible: same 81 tool names and schemas (verified via `tools/list` diff), same CLI commands and output, same credential file format and location.
+- The Rust implementation is behavior-compatible: it shipped with the same 81 tool names and schemas as the Python version (verified via `tools/list` diff), and has since grown to 114 — same CLI commands and output, same credential file format and location.
 - Beyond parity, the rewrite centralizes error handling (HTTP status/code preserved to the MCP boundary), unwraps the `{code,message,data}` envelope once in the client, retries/renews auth in one race-safe place, parallelizes export prefetch and asset upload, and keeps full attempt traces on fetch failures.
 
 ## Development
@@ -410,7 +471,11 @@ cargo build --release      # optimized single binary (LTO, stripped)
 - **Fetch failures keep traces.** `fetch_page_markdown` retries page-view, then falls back to the raw collab endpoint (both collab id types); a final failure includes every attempt (endpoint, attempt number, error) — previously these were silently swallowed.
 - **Concurrency.** Export prefetch and per-page image upload are parallel (`JoinSet` + `Semaphore`, bounded at 8). `reorder_pages` builds an index map instead of repeated linear scans (`O(n²)` → `O(n)`).
 
-### Adding3. Add the handler inside the domain file's `#[tool_router] impl AppServer` block:
+### Adding a tool
+
+1. Pick the domain file in `src/tools/` (or create one and register its router in `src/server.rs`).
+2. Define the request struct: `derive(Debug, Default, Deserialize, rmcp::schemars::JsonSchema)` with `#[serde(default)]`; field doc comments become the tool-input descriptions agents see.
+3. Add the handler inside the domain file's `#[tool_router] impl AppServer` block:
 
 ```rust
 #[tool(name = "appflowy_example", description = "What it does.")]
