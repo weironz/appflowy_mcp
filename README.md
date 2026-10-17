@@ -42,7 +42,7 @@ cargo build --release
 
 ## MCP Client Setup
 
-> 中文完整对接指南（Codex / Claude Code / Claude Desktop / Cursor，含 `--scope user` 的 Windows 坑与排错）: [docs/mcp-connect.md](docs/mcp-connect.md).
+> Full client guides (Codex / Claude Code / Claude Desktop / Cursor — incl. the `--scope user` Windows pitfall and troubleshooting): [docs/mcp-connect.md](docs/mcp-connect.md).
 
 Point your client at the binary with the `serve` argument. Credentials come from the environment.
 
@@ -125,7 +125,7 @@ To create a page inside a space, pass the workspace ID and use the space `view_i
 
 ## Command-Line Interface
 
-The same binary is a full CLI, aimed at scriptable workflows — backups via cron, bulk import, quick lookups. 中文完整命令参考见 [docs/cli.md](docs/cli.md).
+The same binary is a full CLI, aimed at scriptable workflows — backups via cron, bulk import, quick lookups. Full command reference: [docs/cli.md](docs/cli.md).
 
 ```bash
 appflowy login          # prompts for email/password; saves session tokens
@@ -522,3 +522,7 @@ Bump `version` in `Cargo.toml`, commit, push `main`, then push a tag `vX.Y.Z`. `
 - Tokens are stored in memory by the MCP server process; the CLI persists them to its credentials file.
 - `APPFLOWY_EMAIL`, `APPFLOWY_PASSWORD`, and `APPFLOWY_BASE_URL` can also be provided through a local `.env` file.
 - Some page and space endpoints are implemented from AppFlowy source routes that are not present in the public OpenAPI document.
+
+## License
+
+[Apache License 2.0](LICENSE) — Copyright 2026 weironz.
