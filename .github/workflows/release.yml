@@ -55,6 +55,7 @@ jobs:
   build:
     needs: test
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: windows-latest
@@ -83,6 +84,7 @@ jobs:
         run: cargo build --release --locked --target ${{ matrix.target }}
 
       - name: Stage artifact
+        shell: bash
         run: |
           mkdir -p dist
           bin="target/${{ matrix.target }}/release/appflowy"
