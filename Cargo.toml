@@ -1,11 +1,11 @@
 [package]
-name = "appflowy-rs"
+name = "appflowy-mcp"
 version = "0.8.0"
 edition = "2021"
-description = "MCP server and CLI for AppFlowy Cloud (Rust rewrite of appflowy-mcp)"
+description = "MCP server and CLI for AppFlowy Cloud"
 
 [lib]
-name = "appflowy_rs"
+name = "appflowy_mcp"
 path = "src/lib.rs"
 
 [[bin]]

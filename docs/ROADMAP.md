@@ -1,9 +1,10 @@
 # Development Roadmap
 
-> **Status note (v0.8.0):** the project was **rewritten in Rust** (`appflowy-rs/`,
-> released as v0.8.0) and the Python implementation is deprecated; PyPI is
-> frozen at `appflowy-mcp` 0.8.0 / `appflowy-cli` 0.6.4 with no further Python
-> releases planned. Everything marked done below carried over to the Rust
+> **Status note:** the project was **rewritten in Rust** (released as v0.8.0)
+> and the Python implementation has been **removed from the repository** (see
+> tag `v0.8.0` for the Python sources); PyPI is frozen at `appflowy-mcp` 0.8.0 /
+> `appflowy-cli` 0.6.4 with no further Python releases planned. The crate lives
+> at the repository root in standard cargo layout. Everything marked done below carried over to the Rust
 > implementation 1:1 (81/81 tools, verified via `tools/list` diff); the Rust
 > rewrite additionally fixed the underlying causes of Tier 2 items by
 > construction (single envelope unwrap, typed errors end-to-end, one race-safe

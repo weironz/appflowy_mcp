@@ -11,8 +11,8 @@
 
 use std::time::Duration;
 
-use appflowy_rs::client::AppFlowyClient;
-use appflowy_rs::error::Error;
+use appflowy_mcp::client::AppFlowyClient;
+use appflowy_mcp::error::Error;
 use httpmock::prelude::*;
 use httpmock::Mock;
 use reqwest::Method;

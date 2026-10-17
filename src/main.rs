@@ -18,7 +18,7 @@ async fn main() {
         .to_lowercase();
 
     let code = if stem.contains("appflowy-mcp") {
-        match appflowy_rs::cli::serve().await {
+        match appflowy_mcp::cli::serve().await {
             Ok(()) => 0,
             Err(e) => {
                 eprintln!("error: {e:#}");
@@ -26,7 +26,7 @@ async fn main() {
             }
         }
     } else {
-        appflowy_rs::cli::run().await
+        appflowy_mcp::cli::run().await
     };
     std::process::exit(code);
 }

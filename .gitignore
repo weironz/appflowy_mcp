@@ -1,16 +1,5 @@
-.venv/
-.venv-*/
-__pycache__/
-*.py[cod]
+/target
 .env
 .idea
-dist/
-build/
-*.egg-info/
-.pytest_cache/
-.ruff_cache/
-.mypy_cache/
-.env
 .mcp.json
-# Added by code-review-graph
 .code-review-graph/

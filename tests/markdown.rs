@@ -2,7 +2,7 @@
 //! Assertions compare serialized blocks (`serde_json::Value`) against the
 //! Python dict expectations.
 
-use appflowy_rs::markdown::{
+use appflowy_mcp::markdown::{
     parse_content_to_blocks, parse_markdown_to_blocks, parse_plain_text_to_blocks,
     parse_rich_text, Block,
 };

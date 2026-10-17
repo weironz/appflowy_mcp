@@ -10,9 +10,9 @@ use serde_json::{json, Value};
 use yrs::types::Attrs;
 use yrs::{Any, ArrayPrelim, Doc, Map, MapPrelim, ReadTxn, StateVector, Text, TextPrelim, Transact};
 
-use appflowy_rs::collab::{decode_document, BlockEntry, Document};
-use appflowy_rs::delta::DeltaOp;
-use appflowy_rs::render::{delta_to_markdown, document_to_markdown, sanitize_filename};
+use appflowy_mcp::collab::{decode_document, BlockEntry, Document};
+use appflowy_mcp::delta::DeltaOp;
+use appflowy_mcp::render::{delta_to_markdown, document_to_markdown, sanitize_filename};
 
 // ---------------------------------------------------------------------------
 // Plain-struct fixtures (port of make_document from test_export.py)
@@ -447,7 +447,7 @@ fn test_decode_invalid_update_errors() {
 
 #[test]
 fn test_export_reimports_cleanly() {
-    use appflowy_rs::markdown::parse_markdown_to_blocks;
+    use appflowy_mcp::markdown::parse_markdown_to_blocks;
     let doc = make_document(vec![
         spec("heading", json!({"level": 1}), Some(vec![DeltaOp::plain("H")]), vec![]),
         spec(
@@ -474,8 +474,8 @@ fn test_export_reimports_cleanly() {
 
 use std::time::Duration;
 
-use appflowy_rs::client::AppFlowyClient;
-use appflowy_rs::tools::export::{
+use appflowy_mcp::client::AppFlowyClient;
+use appflowy_mcp::tools::export::{
     export_views_to_directory, fetch_collab_markdown, fetch_page_markdown,
 };
 use httpmock::prelude::*;

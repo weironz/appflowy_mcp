@@ -1,15 +1,15 @@
 name: Release
 
 # Cut a release:
-#   1. bump `version` in appflowy-rs/Cargo.toml
+#   1. bump `version` in Cargo.toml
 #   2. commit, push main
 #   3. git tag vX.Y.Z && git push origin vX.Y.Z
 #
 # The workflow verifies the tag matches the Rust crate version, runs the test
 # suite, builds release binaries for Windows/Linux/macOS, and creates a GitHub
 # Release with the binaries attached. PyPI is intentionally NOT published to
-# anymore (the Python implementation is deprecated; the crates' final versions
-# stay installable as-is).
+# anymore (the Python implementation has been removed; its final packages stay
+# installable as-is).
 
 on:
   push:
@@ -35,25 +35,21 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: appflowy-rs
 
       - name: Verify tag matches the crate version
         run: |
           tag="${GITHUB_REF_NAME#v}"
-          version="$(grep -m1 '^version' appflowy-rs/Cargo.toml | cut -d '"' -f2)"
+          version="$(grep -m1 '^version' Cargo.toml | cut -d '"' -f2)"
           echo "tag=$tag crate=$version"
           if [ "$tag" != "$version" ]; then
-            echo "::error::Tag v$tag does not match appflowy-rs crate version $version"
+            echo "::error::Tag v$tag does not match crate version $version"
             exit 1
           fi
 
       - name: Run tests
-        working-directory: appflowy-rs
         run: cargo test --all-targets --locked
 
       - name: Clippy
-        working-directory: appflowy-rs
         run: cargo clippy --all-targets --locked -- -D warnings
 
   build:
@@ -82,17 +78,14 @@ jobs:
           targets: ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: appflowy-rs
 
       - name: Build release binary
-        working-directory: appflowy-rs
         run: cargo build --release --locked --target ${{ matrix.target }}
 
       - name: Stage artifact
         run: |
           mkdir -p dist
-          bin="appflowy-rs/target/${{ matrix.target }}/release/appflowy"
+          bin="target/${{ matrix.target }}/release/appflowy"
           if [ ! -f "$bin" ]; then bin="$bin.exe"; fi
           cp "$bin" "dist/${{ matrix.artifact }}"
           ls -la dist
