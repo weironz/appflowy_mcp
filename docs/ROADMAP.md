@@ -135,7 +135,7 @@ the only true feature ceiling (the server is otherwise append-only via
 
 ---
 
-## 2026-10 API gap catch-up — shipped (unreleased; tools count 81 -> 114)
+## 2026-10 API gap catch-up — shipped in v0.8.1 (tools count 81 -> 114)
 
 Source: AppFlowy-Cloud is archived (open-core now); the freshest public API
 surface is the [AppFlowy-Web client HTTP layer](https://github.com/AppFlowy-IO/AppFlowy-Web/tree/main/src/application/services/js-services/http).
@@ -178,7 +178,7 @@ older self-hosted images lack them.
 - [x] **Row comment notification**:
   `/api/workspace/{ws}/database/{db}/row/{rowId}/comment/notification`.
 
-### Maintenance wave — shipped (unreleased; tools count 119 -> 128)
+### Maintenance wave — shipped in v0.9.0 (tools count 119 -> 128)
 
 Small/medium items from the backlog, all verified (unit tests + live cloud
 where possible):
@@ -228,7 +228,7 @@ where possible):
   (permission-resolver busy) under load — it hits every collab mutation
   equally and clears on its own.
 
-### Community intake — shipped (unreleased; tools count 114 -> 119)
+### Community intake — shipped in v0.8.2 (tools count 114 -> 119)
 
 Community PRs/issues written against the Python tree (before the Rust
 rewrite) were ported and — unlike the original PRs — every claim was
