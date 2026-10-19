@@ -101,7 +101,8 @@ pub struct SetPublishNamespaceParams {
 impl AppServer {
     #[tool(
         name = "appflowy_duplicate_published_page",
-        description = "Duplicate a published page or template into a workspace. dest_view_id is the destination parent Space or Page (not the workspace_id)."
+        description = "Duplicate a published page or template into a workspace. dest_view_id is the destination parent Space or Page (not the workspace_id).",
+        annotations(title = "Duplicate published page", open_world_hint = true)
     )]
     async fn appflowy_duplicate_published_page(
         &self,
@@ -127,7 +128,13 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_get_published_outline",
-        description = "Get the full page tree of a published workspace by its publish namespace. Public: no membership in that workspace is required."
+        description = "Get the full page tree of a published workspace by its publish namespace. Public: no membership in that workspace is required.",
+        annotations(
+            title = "Get published outline",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn appflowy_get_published_outline(
         &self,
@@ -154,7 +161,13 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_get_published_comments",
-        description = "List comments on a published view."
+        description = "List comments on a published view. Returns personal data (names/emails); share within workspace permissions only.",
+        annotations(
+            title = "Get published comments",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn appflowy_get_published_comments(
         &self,
@@ -175,7 +188,8 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_add_published_comment",
-        description = "Add a comment to a published view, optionally replying to another comment."
+        description = "Add a comment to a published view, optionally replying to another comment. Returns personal data (names/emails); share within workspace permissions only.",
+        annotations(title = "Add published comment", open_world_hint = true)
     )]
     async fn appflowy_add_published_comment(
         &self,
@@ -200,7 +214,13 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_get_published_reactions",
-        description = "List reactions on a published view, optionally filtered to one comment."
+        description = "List reactions on a published view, optionally filtered to one comment. Returns personal data (names/emails); share within workspace permissions only.",
+        annotations(
+            title = "Get published reactions",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn appflowy_get_published_reactions(
         &self,
@@ -226,7 +246,8 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_add_published_reaction",
-        description = "Add an emoji reaction to a comment on a published view."
+        description = "Add an emoji reaction to a comment on a published view. Returns personal data (names/emails); share within workspace permissions only.",
+        annotations(title = "Add published reaction", open_world_hint = true)
     )]
     async fn appflowy_add_published_reaction(
         &self,
@@ -250,7 +271,8 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_publish_page",
-        description = "Publish a page to the web so anyone with the link can view it."
+        description = "Publish a page to the web so anyone with the link can view it.",
+        annotations(title = "Publish page", open_world_hint = true)
     )]
     async fn appflowy_publish_page(
         &self,
@@ -309,7 +331,12 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_unpublish_page",
-        description = "Unpublish a page from the web."
+        description = "Unpublish a page from the web.",
+        annotations(
+            title = "Unpublish page",
+            destructive_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn appflowy_unpublish_page(
         &self,
@@ -332,7 +359,13 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_get_publish_namespace",
-        description = "Get the workspace publish namespace (the subdomain published pages live under)."
+        description = "Get the workspace publish namespace (the subdomain published pages live under).",
+        annotations(
+            title = "Get publish namespace",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn appflowy_get_publish_namespace(
         &self,
@@ -353,7 +386,8 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_set_publish_namespace",
-        description = "Rename the workspace publish namespace."
+        description = "Rename the workspace publish namespace.",
+        annotations(title = "Set publish namespace", open_world_hint = true)
     )]
     async fn appflowy_set_publish_namespace(
         &self,
@@ -386,7 +420,13 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_list_published_views",
-        description = "List all published pages in a workspace."
+        description = "List all published pages in a workspace.",
+        annotations(
+            title = "List published views",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn appflowy_list_published_views(
         &self,

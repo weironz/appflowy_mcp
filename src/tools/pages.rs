@@ -298,7 +298,8 @@ impl AppServer {
     /// Return `json!` shape shared by the thin proxy tools.
     #[tool(
         name = "appflowy_create_page",
-        description = "Create a page under a space or parent page."
+        description = "Create a page under a space or parent page.",
+        annotations(title = "Create page", open_world_hint = true)
     )]
     async fn appflowy_create_page(
         &self,
@@ -336,7 +337,13 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_get_page",
-        description = "Get page view details and collab data."
+        description = "Get page view details and collab data.",
+        annotations(
+            title = "Get page",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn appflowy_get_page(
         &self,
@@ -358,7 +365,13 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_get_collab",
-        description = "Get a document's content as Markdown via the raw collab endpoint. This reads collab storage directly, bypassing the lazy page-view path, so it can recover pages that appflowy_get_page / export report as 'Collab not found' or return empty."
+        description = "Get a document's content as Markdown via the raw collab endpoint. This reads collab storage directly, bypassing the lazy page-view path, so it can recover pages that appflowy_get_page / export report as 'Collab not found' or return empty.",
+        annotations(
+            title = "Get collab",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn appflowy_get_collab(
         &self,
@@ -389,7 +402,8 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_update_page",
-        description = "Update a page name, icon, lock state, or extra metadata."
+        description = "Update a page name, icon, lock state, or extra metadata.",
+        annotations(title = "Update page", open_world_hint = true)
     )]
     async fn appflowy_update_page(
         &self,
@@ -416,7 +430,8 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_move_page",
-        description = "Move a page to a new parent and/or reorder it among its siblings. Set new_parent_view_id to the destination parent (pass the page's current parent to reorder in place) and prev_view_id to the sibling to place it after (omit to put it first)."
+        description = "Move a page to a new parent and/or reorder it among its siblings. Set new_parent_view_id to the destination parent (pass the page's current parent to reorder in place) and prev_view_id to the sibling to place it after (omit to put it first).",
+        annotations(title = "Move page", open_world_hint = true)
     )]
     async fn appflowy_move_page(
         &self,
@@ -447,7 +462,8 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_reorder_pages",
-        description = "Reorder the direct child pages of a space or page in one call. Give either an explicit page_ids order or sort_by name/created_at/last_edited_time. AppFlowy has no bulk-sort endpoint, so this chains the per-page move endpoint, skipping pages already in place."
+        description = "Reorder the direct child pages of a space or page in one call. Give either an explicit page_ids order or sort_by name/created_at/last_edited_time. AppFlowy has no bulk-sort endpoint, so this chains the per-page move endpoint, skipping pages already in place.",
+        annotations(title = "Reorder pages", open_world_hint = true)
     )]
     async fn appflowy_reorder_pages(
         &self,
@@ -602,7 +618,12 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_move_page_to_trash",
-        description = "Move a page to trash."
+        description = "Move a page to trash.",
+        annotations(
+            title = "Move page to trash",
+            destructive_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn appflowy_move_page_to_trash(
         &self,
@@ -627,7 +648,12 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_restore_page_from_trash",
-        description = "Restore a page from trash."
+        description = "Restore a page from trash.",
+        annotations(
+            title = "Restore page from trash",
+            destructive_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn appflowy_restore_page_from_trash(
         &self,
@@ -652,7 +678,12 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_delete_page_from_trash",
-        description = "Permanently delete a trashed page."
+        description = "Permanently delete a trashed page.",
+        annotations(
+            title = "Delete page from trash",
+            destructive_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn appflowy_delete_page_from_trash(
         &self,
@@ -674,7 +705,8 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_favorite_page",
-        description = "Favorite, unfavorite, pin, or unpin a page."
+        description = "Favorite, unfavorite, pin, or unpin a page.",
+        annotations(title = "Favorite page", open_world_hint = true)
     )]
     async fn appflowy_favorite_page(
         &self,
@@ -702,7 +734,8 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_reorder_favorite",
-        description = "Reorder a page within the favorites list. prev_view_id is the favorite to place it after (omit to put it first)."
+        description = "Reorder a page within the favorites list. prev_view_id is the favorite to place it after (omit to put it first).",
+        annotations(title = "Reorder favorite", open_world_hint = true)
     )]
     async fn appflowy_reorder_favorite(
         &self,
@@ -729,7 +762,13 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_list_trash",
-        description = "List trashed pages in a workspace."
+        description = "List trashed pages in a workspace.",
+        annotations(
+            title = "List trash",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn appflowy_list_trash(
         &self,
@@ -750,7 +789,13 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_list_favorites",
-        description = "List favorite pages in a workspace."
+        description = "List favorite pages in a workspace.",
+        annotations(
+            title = "List favorites",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn appflowy_list_favorites(
         &self,
@@ -771,7 +816,8 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_duplicate_page",
-        description = "Duplicate a page and all of its child pages."
+        description = "Duplicate a page and all of its child pages.",
+        annotations(title = "Duplicate page", open_world_hint = true)
     )]
     async fn appflowy_duplicate_page(
         &self,
@@ -799,7 +845,13 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_list_recent",
-        description = "List recently viewed pages in a workspace."
+        description = "List recently viewed pages in a workspace.",
+        annotations(
+            title = "List recent",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn appflowy_list_recent(
         &self,
@@ -820,7 +872,12 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_restore_all_from_trash",
-        description = "Restore all trashed pages in a workspace."
+        description = "Restore all trashed pages in a workspace.",
+        annotations(
+            title = "Restore all from trash",
+            destructive_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn appflowy_restore_all_from_trash(
         &self,
@@ -844,7 +901,8 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_empty_trash",
-        description = "Permanently delete ALL trashed pages in a workspace. Irreversible."
+        description = "Permanently delete ALL trashed pages in a workspace. Irreversible.",
+        annotations(title = "Empty trash", destructive_hint = true, open_world_hint = true)
     )]
     async fn appflowy_empty_trash(
         &self,

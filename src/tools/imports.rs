@@ -329,7 +329,8 @@ fn require_non_empty(value: &str, field: &str) -> AppResult<()> {
 impl AppServer {
     #[tool(
         name = "appflowy_import_csv",
-        description = "Import a local .csv file into an AppFlowy database. Asynchronous task: the server-side import completes in the background after the file is staged to the returned presigned URL; poll with appflowy_get_csv_import_status."
+        description = "Import a local .csv file into an AppFlowy database. Asynchronous task: the server-side import completes in the background after the file is staged to the returned presigned URL; poll with appflowy_get_csv_import_status.",
+        annotations(title = "Import csv", open_world_hint = true)
     )]
     async fn appflowy_import_csv(
         &self,
@@ -423,7 +424,13 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_get_csv_import_status",
-        description = "Poll the status of a CSV database import task created by appflowy_import_csv. The import runs asynchronously on the server; call repeatedly until status is Completed, Failed, Expire or Cancel."
+        description = "Poll the status of a CSV database import task created by appflowy_import_csv. The import runs asynchronously on the server; call repeatedly until status is Completed, Failed, Expire or Cancel.",
+        annotations(
+            title = "Get csv import status",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn appflowy_get_csv_import_status(
         &self,
@@ -448,7 +455,12 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_cancel_csv_import",
-        description = "Cancel a running CSV database import task created by appflowy_import_csv."
+        description = "Cancel a running CSV database import task created by appflowy_import_csv.",
+        annotations(
+            title = "Cancel csv import",
+            destructive_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn appflowy_cancel_csv_import(
         &self,
@@ -473,7 +485,8 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_import_document",
-        description = "Import a local document file (.doc, .html, .docx or .pdf) as a new AppFlowy document page under a parent page. Asynchronous task: the server converts the file in the background after it is staged to the returned presigned URL; poll with appflowy_get_document_import_status."
+        description = "Import a local document file (.doc, .html, .docx or .pdf) as a new AppFlowy document page under a parent page. Asynchronous task: the server converts the file in the background after it is staged to the returned presigned URL; poll with appflowy_get_document_import_status.",
+        annotations(title = "Import document", open_world_hint = true)
     )]
     async fn appflowy_import_document(
         &self,
@@ -519,7 +532,13 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_get_document_import_status",
-        description = "Poll the status of a document file import task created by appflowy_import_document. The conversion runs asynchronously on the server; call repeatedly until status is Completed, Failed, Expire or Cancel."
+        description = "Poll the status of a document file import task created by appflowy_import_document. The conversion runs asynchronously on the server; call repeatedly until status is Completed, Failed, Expire or Cancel.",
+        annotations(
+            title = "Get document import status",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn appflowy_get_document_import_status(
         &self,
@@ -544,7 +563,8 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_import_notion_zip",
-        description = "Import a local .zip file exported from Notion into an AppFlowy workspace under a parent page. The task is created via POST /api/import/{workspace_id}/notion and the zip is staged to the returned presigned URL (single PUT, or per-part PUTs plus complete-multipart when the server requests multipart). The server-side import then runs in the background; poll with appflowy_get_import_task."
+        description = "Import a local .zip file exported from Notion into an AppFlowy workspace under a parent page. The task is created via POST /api/import/{workspace_id}/notion and the zip is staged to the returned presigned URL (single PUT, or per-part PUTs plus complete-multipart when the server requests multipart). The server-side import then runs in the background; poll with appflowy_get_import_task.",
+        annotations(title = "Import notion zip", open_world_hint = true)
     )]
     async fn appflowy_import_notion_zip(
         &self,
@@ -613,7 +633,13 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_get_import_task",
-        description = "Get the status of an import task (e.g. one created by appflowy_import_notion_zip). The public client exposes no per-task status endpoint, so this calls GET /api/import and filters the returned task list by task_id; the task entry is returned verbatim with `found: true`. The `status` field may be an enum number or a string — its values are passed through as-is and the enumeration shown by the server (e.g. pending/uploading/importing/succeeded/failed) is not exhaustively documented; treat the server as authoritative. If the task is absent from the list, returns {task_id, status: \"unknown\", found: false}."
+        description = "Get the status of an import task (e.g. one created by appflowy_import_notion_zip). The public client exposes no per-task status endpoint, so this calls GET /api/import and filters the returned task list by task_id; the task entry is returned verbatim with `found: true`. The `status` field may be an enum number or a string — its values are passed through as-is and the enumeration shown by the server (e.g. pending/uploading/importing/succeeded/failed) is not exhaustively documented; treat the server as authoritative. If the task is absent from the list, returns {task_id, status: \"unknown\", found: false}.",
+        annotations(
+            title = "Get import task",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn appflowy_get_import_task(
         &self,
@@ -653,7 +679,12 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_cancel_import_task",
-        description = "Cancel a running import task (e.g. one created by appflowy_import_notion_zip) via POST /api/import/tasks/{task_id}/cancel."
+        description = "Cancel a running import task (e.g. one created by appflowy_import_notion_zip) via POST /api/import/tasks/{task_id}/cancel.",
+        annotations(
+            title = "Cancel import task",
+            destructive_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn appflowy_cancel_import_task(
         &self,

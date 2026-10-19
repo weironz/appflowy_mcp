@@ -242,11 +242,41 @@ fn history_page_items(page: &Value) -> Option<Vec<Value>> {
     }
 }
 
+/// Element of the `appflowy_list_rows` output (AppFlowy-Cloud
+/// `AFDatabaseRow`): one row id. Unlisted keys are allowed.
+#[derive(Debug, rmcp::schemars::JsonSchema)]
+pub struct ListRowsItemOutput {
+    /// Row id.
+    pub id: String,
+}
+
+/// Element of the `appflowy_get_row_details` output (AppFlowy-Cloud
+/// `AFDatabaseRowDetail`): the row's cells keyed by database field id.
+/// Only `id` is guaranteed; `doc` is present only when requested with
+/// `with_doc`; unlisted keys are allowed.
+#[derive(Debug, rmcp::schemars::JsonSchema)]
+pub struct RowDetailsItemOutput {
+    /// Row id.
+    pub id: String,
+    /// Cell values keyed by database field id.
+    pub cells: Option<std::collections::HashMap<String, Value>>,
+    /// Whether the row has an own document (page body).
+    pub has_doc: Option<bool>,
+    /// The row's document payload, when `with_doc` was set.
+    pub doc: Option<String>,
+}
+
 #[tool_router(router = database_tool_router, vis = "pub(crate)")]
 impl AppServer {
     #[tool(
         name = "appflowy_list_databases",
-        description = "List all databases in a workspace."
+        description = "List all databases in a workspace.",
+        annotations(
+            title = "List databases",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn appflowy_list_databases(
         &self,
@@ -267,7 +297,13 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_get_database_fields",
-        description = "Get fields of a specific database."
+        description = "Get fields of a specific database.",
+        annotations(
+            title = "Get database fields",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn appflowy_get_database_fields(
         &self,
@@ -283,7 +319,14 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_list_rows",
-        description = "List all row IDs in a database."
+        description = "List all row IDs in a database.",
+        output_schema = rmcp::handler::server::tool::schema_for_output::<Vec<ListRowsItemOutput>>(),
+        annotations(
+            title = "List rows",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn appflowy_list_rows(
         &self,
@@ -299,7 +342,14 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_get_row_details",
-        description = "Get details of specific rows by IDs."
+        description = "Get details of specific rows by IDs.",
+        output_schema = rmcp::handler::server::tool::schema_for_output::<Vec<RowDetailsItemOutput>>(),
+        annotations(
+            title = "Get row details",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn appflowy_get_row_details(
         &self,
@@ -330,7 +380,8 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_create_row",
-        description = "Create a database row. IMPORTANT: when the row needs a page body, pass the Markdown in `document` in this same call — it atomically initializes the row's separate document collab. Do NOT create an empty row and then call a normal page append tool (e.g. appflowy_append_markdown_to_page) with the row ID: a row is a DatabaseRow collab and its page body is a different Document collab, so page append with the row ID fails with 'is not active'. For later additions use appflowy_append_markdown_to_row. Checklist cells through this tool need an id on every option; appflowy_update_row accepts plain task names."
+        description = "Create a database row. IMPORTANT: when the row needs a page body, pass the Markdown in `document` in this same call — it atomically initializes the row's separate document collab. Do NOT create an empty row and then call a normal page append tool (e.g. appflowy_append_markdown_to_page) with the row ID: a row is a DatabaseRow collab and its page body is a different Document collab, so page append with the row ID fails with 'is not active'. For later additions use appflowy_append_markdown_to_row. Checklist cells through this tool need an id on every option; appflowy_update_row accepts plain task names.",
+        annotations(title = "Create row", open_world_hint = true)
     )]
     async fn appflowy_create_row(
         &self,
@@ -372,7 +423,8 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_upsert_row",
-        description = "Create-or-update a row keyed by `pre_hash` (reuse the same non-empty value for the same logical row; `document` Markdown replaces the row's page body). WARNING: the server derives the row id from pre_hash (not a valid v4 UUID) and never adds the row to any view, so it does not show up in boards/grids. To create a row use appflowy_create_row; to edit cells use appflowy_update_row."
+        description = "Create-or-update a row keyed by `pre_hash` (reuse the same non-empty value for the same logical row; `document` Markdown replaces the row's page body). WARNING: the server derives the row id from pre_hash (not a valid v4 UUID) and never adds the row to any view, so it does not show up in boards/grids. To create a row use appflowy_create_row; to edit cells use appflowy_update_row.",
+        annotations(title = "Upsert row", open_world_hint = true)
     )]
     async fn appflowy_upsert_row(
         &self,
@@ -427,7 +479,13 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_get_updated_rows",
-        description = "Find updated rows in a database after a specific datetime."
+        description = "Find updated rows in a database after a specific datetime.",
+        annotations(
+            title = "Get updated rows",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn appflowy_get_updated_rows(
         &self,
@@ -447,7 +505,8 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_append_markdown_to_row",
-        description = "Append Markdown to an existing database row's page body. This resolves the row's separate deterministic Document collab (UUIDv5 derived from the row id) instead of wrongly using the row id as a page id — appending with appflowy_append_markdown_to_page and a row id targets the wrong collab and fails with 'is not active'. The row document must already exist: pass `document` when creating the row with appflowy_create_row / appflowy_upsert_row."
+        description = "Append Markdown to an existing database row's page body. This resolves the row's separate deterministic Document collab (UUIDv5 derived from the row id) instead of wrongly using the row id as a page id — appending with appflowy_append_markdown_to_page and a row id targets the wrong collab and fails with 'is not active'. The row document must already exist: pass `document` when creating the row with appflowy_create_row / appflowy_upsert_row.",
+        annotations(title = "Append markdown to row", open_world_hint = true)
     )]
     async fn appflowy_append_markdown_to_row(
         &self,
@@ -512,7 +571,8 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_update_row",
-        description = "Edit cells of an EXISTING row (the REST API cannot edit rows; this writes through the collab web-update the way the web client does). `cells` maps a field name (or field id) to a value: text/number/url -> string; single select -> option name; multi select -> list of option names; checkbox -> bool; date -> ISO date/datetime, unix seconds, or {start, end?, include_time?}; checklist -> list of task names or {name, done} items (replaces the list), or {check, uncheck, add, remove: [task names]} (edits the current list). Nothing is written if any value is invalid."
+        description = "Edit cells of an EXISTING row (the REST API cannot edit rows; this writes through the collab web-update the way the web client does). `cells` maps a field name (or field id) to a value: text/number/url -> string; single select -> option name; multi select -> list of option names; checkbox -> bool; date -> ISO date/datetime, unix seconds, or {start, end?, include_time?}; checklist -> list of task names or {name, done} items (replaces the list), or {check, uncheck, add, remove: [task names]} (edits the current list). Nothing is written if any value is invalid.",
+        annotations(title = "Update row", open_world_hint = true)
     )]
     async fn appflowy_update_row(
         &self,
@@ -653,7 +713,8 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_delete_row",
-        description = "Delete a row from a database exactly as the web UI does: the row is flagged `is_deleted` in place in every view's row order (so it is hidden everywhere) and can be brought back with appflowy_restore_row."
+        description = "Delete a row from a database exactly as the web UI does: the row is flagged `is_deleted` in place in every view's row order (so it is hidden everywhere) and can be brought back with appflowy_restore_row.",
+        annotations(title = "Delete row", destructive_hint = true, open_world_hint = true)
     )]
     async fn appflowy_delete_row(
         &self,
@@ -664,7 +725,8 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_restore_row",
-        description = "Undo appflowy_delete_row: clear a deleted row's flag in every view so it becomes visible again."
+        description = "Undo appflowy_delete_row: clear a deleted row's flag in every view so it becomes visible again.",
+        annotations(title = "Restore row", destructive_hint = true, open_world_hint = true)
     )]
     async fn appflowy_restore_row(
         &self,
@@ -675,7 +737,8 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_create_database_field",
-        description = "Add a new field (column) to a database."
+        description = "Add a new field (column) to a database.",
+        annotations(title = "Create database field", open_world_hint = true)
     )]
     async fn appflowy_create_database_field(
         &self,
@@ -715,7 +778,13 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_list_database_history",
-        description = "List a database's version/checkpoint history (read-only; AppFlowy commercial cloud). Entries carry the version id and its timestamp, so they tell you which point a rollback would target; previewing a version's content and restoring from it are NOT supported. Pagination: `limit` (API default 30) plus an optional `since` (unix seconds) filter are sent directly; subsequent pages are addressed by echoing the response's next-cursor field back as the `cursor` query parameter — set fetch_all=true to follow it automatically and merge every page."
+        description = "List a database's version/checkpoint history (read-only; AppFlowy commercial cloud). Entries carry the version id and its timestamp, so they tell you which point a rollback would target; previewing a version's content and restoring from it are NOT supported. Pagination: `limit` (API default 30) plus an optional `since` (unix seconds) filter are sent directly; subsequent pages are addressed by echoing the response's next-cursor field back as the `cursor` query parameter — set fetch_all=true to follow it automatically and merge every page.",
+        annotations(
+            title = "List database history",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn appflowy_list_database_history(
         &self,
@@ -808,7 +877,13 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_get_database_restore_state",
-        description = "Check whether a database is currently sitting on a history restore point (read-only; AppFlowy commercial cloud). Returns {database_restore_id, version}: both null when the database is at its live head; when set, the database was restored from that version of its history (see appflowy_list_database_history)."
+        description = "Check whether a database is currently sitting on a history restore point (read-only; AppFlowy commercial cloud). Returns {database_restore_id, version}: both null when the database is at its live head; when set, the database was restored from that version of its history (see appflowy_list_database_history).",
+        annotations(
+            title = "Get database restore state",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn appflowy_get_database_restore_state(
         &self,

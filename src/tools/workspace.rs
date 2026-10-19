@@ -117,11 +117,65 @@ pub struct UpdateSpaceRequest {
     pub space_icon_color: String,
 }
 
+/// Output element of `appflowy_list_workspaces`: one workspace record as
+/// returned by `GET /api/workspace` (AppFlowy-Cloud `AFWorkspace`), passed
+/// through verbatim. Only `workspace_id` is guaranteed; unlisted keys are
+/// allowed.
+#[derive(Debug, rmcp::schemars::JsonSchema)]
+pub struct WorkspaceRecordOutput {
+    /// Workspace id (uuid).
+    pub workspace_id: String,
+    pub workspace_name: Option<String>,
+    /// 0 = private workspace, 2 = standard.
+    pub workspace_type: Option<i64>,
+    pub database_storage_id: Option<String>,
+    pub owner_uid: Option<i64>,
+    pub owner_name: Option<String>,
+    pub owner_email: Option<String>,
+    pub created_at: Option<String>,
+    pub icon: Option<String>,
+    pub member_count: Option<i64>,
+    /// Role of the requesting user in this workspace (e.g. 20 = Owner).
+    pub role: Option<i64>,
+}
+
+/// One folder-tree node (AppFlowy-Cloud `FolderView`), the recursive shape
+/// of `appflowy_get_workspace_folder`'s tree and of each element of
+/// `appflowy_list_spaces`. Only `view_id` is guaranteed; spaces may omit
+/// `children` beyond the fetched depth, and unlisted keys are allowed.
+#[derive(Debug, rmcp::schemars::JsonSchema)]
+pub struct FolderViewOutput {
+    /// View id of the folder entry (uuid).
+    pub view_id: String,
+    pub parent_view_id: Option<String>,
+    pub name: Option<String>,
+    pub is_space: Option<bool>,
+    pub is_private: Option<bool>,
+    pub is_published: Option<bool>,
+    pub is_favorite: Option<bool>,
+    /// 0 = document, 1 = grid, 2 = board, 3 = calendar.
+    pub layout: Option<i64>,
+    pub created_at: Option<String>,
+    pub last_edited_time: Option<String>,
+    pub icon: Option<Value>,
+    /// Space extras as a JSON object or a JSON-encoded string.
+    pub extra: Option<Value>,
+    /// Child views, up to the requested/exposed tree depth.
+    pub children: Option<Vec<FolderViewOutput>>,
+}
+
 #[tool_router(router = workspace_tool_router, vis = "pub(crate)")]
 impl AppServer {
     #[tool(
         name = "appflowy_list_workspaces",
-        description = "List all workspaces for the authenticated user."
+        description = "List all workspaces for the authenticated user.",
+        output_schema = rmcp::handler::server::tool::schema_for_output::<Vec<WorkspaceRecordOutput>>(),
+        annotations(
+            title = "List workspaces",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn appflowy_list_workspaces(&self) -> Result<Json<Value>, ToolError> {
         // Python: `client._request("GET", "/api/workspace").get("data", [])`.
@@ -141,7 +195,14 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_get_workspace_folder",
-        description = "Get a workspace folder tree. Use root_view_id to expand a specific space/page and depth to control recursion."
+        description = "Get a workspace folder tree. Use root_view_id to expand a specific space/page and depth to control recursion.",
+        output_schema = rmcp::handler::server::tool::schema_for_output::<FolderViewOutput>(),
+        annotations(
+            title = "Get workspace folder",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn appflowy_get_workspace_folder(
         &self,
@@ -170,7 +231,14 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_list_spaces",
-        description = "List all spaces in a workspace. Spaces are folder views where is_space is true."
+        description = "List all spaces in a workspace. Spaces are folder views where is_space is true.",
+        output_schema = rmcp::handler::server::tool::schema_for_output::<Vec<FolderViewOutput>>(),
+        annotations(
+            title = "List spaces",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn appflowy_list_spaces(
         &self,
@@ -196,7 +264,8 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_create_space",
-        description = "Create a space in a workspace."
+        description = "Create a space in a workspace.",
+        annotations(title = "Create space", open_world_hint = true)
     )]
     async fn appflowy_create_space(
         &self,
@@ -227,7 +296,8 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_update_space",
-        description = "Update a space name, icon, color, or permission."
+        description = "Update a space name, icon, color, or permission.",
+        annotations(title = "Update space", open_world_hint = true)
     )]
     async fn appflowy_update_space(
         &self,

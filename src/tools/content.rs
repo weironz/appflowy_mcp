@@ -6,7 +6,8 @@
 
 use reqwest::Method;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::{tool, tool_router, ErrorData, Json};
+use rmcp::service::RequestContext;
+use rmcp::{tool, tool_router, ErrorData, Json, RoleServer};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -14,7 +15,7 @@ use crate::importer::MarkdownImporter;
 use crate::markdown::{parse_content_to_blocks, parse_markdown_to_blocks};
 use crate::server::AppServer;
 use crate::tools::util::{
-    create_page_with_blocks, ensure_parent_is_not_workspace, map_tool_error, ToolError,
+    create_page_with_blocks, ensure_parent_is_not_workspace, map_tool_error, ToolError, ToolProgress,
 };
 
 /// Python `Field(..., min_length=1)` on strings, checked after trimming.
@@ -237,7 +238,8 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_append_blocks_to_page",
-        description = "Append raw AppFlowy document blocks to the end of a page."
+        description = "Append raw AppFlowy document blocks to the end of a page.",
+        annotations(title = "Append blocks to page", open_world_hint = true)
     )]
     async fn appflowy_append_blocks_to_page(
         &self,
@@ -256,7 +258,8 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_append_text_to_page",
-        description = "Append one or more plain-text paragraph blocks to the end of a page."
+        description = "Append one or more plain-text paragraph blocks to the end of a page.",
+        annotations(title = "Append text to page", open_world_hint = true)
     )]
     async fn appflowy_append_text_to_page(
         &self,
@@ -286,7 +289,8 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_create_markdown_page",
-        description = "Create a document page from Markdown content. Prefer appflowy_save_page for general AI answer or note saving."
+        description = "Create a document page from Markdown content. Prefer appflowy_save_page for general AI answer or note saving.",
+        annotations(title = "Create markdown page", open_world_hint = true)
     )]
     async fn appflowy_create_markdown_page(
         &self,
@@ -316,7 +320,8 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_append_markdown_to_page",
-        description = "Append Markdown content to an existing document page."
+        description = "Append Markdown content to an existing document page.",
+        annotations(title = "Append markdown to page", open_world_hint = true)
     )]
     async fn appflowy_append_markdown_to_page(
         &self,
@@ -342,7 +347,8 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_save_page",
-        description = "Default tool for saving AI answers, notes, summaries, or generated content as a new AppFlowy document page. The content_format defaults to markdown, so Markdown headings, lists, links, code blocks, and rich text are converted to AppFlowy blocks unless content_format is explicitly set to plain_text."
+        description = "Default tool for saving AI answers, notes, summaries, or generated content as a new AppFlowy document page. The content_format defaults to markdown, so Markdown headings, lists, links, code blocks, and rich text are converted to AppFlowy blocks unless content_format is explicitly set to plain_text.",
+        annotations(title = "Save page", open_world_hint = true)
     )]
     async fn appflowy_save_page(
         &self,
@@ -377,7 +383,8 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_append_page_content",
-        description = "Default tool for appending AI answers, notes, summaries, or generated content to an existing AppFlowy document page. The content_format defaults to markdown."
+        description = "Default tool for appending AI answers, notes, summaries, or generated content to an existing AppFlowy document page. The content_format defaults to markdown.",
+        annotations(title = "Append page content", open_world_hint = true)
     )]
     async fn appflowy_append_page_content(
         &self,
@@ -407,7 +414,8 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_append_page_link",
-        description = "Append a native Link-to-page block to an AppFlowy document page. This is a real AppFlowy block (not a Markdown hyperlink): in the AppFlowy GUI it renders as a clickable link that jumps straight to the target page."
+        description = "Append a native Link-to-page block to an AppFlowy document page. This is a real AppFlowy block (not a Markdown hyperlink): in the AppFlowy GUI it renders as a clickable link that jumps straight to the target page.",
+        annotations(title = "Append page link", open_world_hint = true)
     )]
     async fn appflowy_append_page_link(
         &self,
@@ -444,7 +452,8 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_import_markdown_file",
-        description = "Import one local Markdown file as an AppFlowy page. Local image references in Markdown are resolved relative to the file, uploaded to AppFlowy, and replaced with AppFlowy file URLs when upload_assets is true."
+        description = "Import one local Markdown file as an AppFlowy page. Local image references in Markdown are resolved relative to the file, uploaded to AppFlowy, and replaced with AppFlowy file URLs when upload_assets is true.",
+        annotations(title = "Import markdown file", open_world_hint = true)
     )]
     async fn appflowy_import_markdown_file(
         &self,
@@ -471,11 +480,13 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_import_markdown_directory",
-        description = "Recursively import a local Markdown directory into AppFlowy. Every local folder becomes an AppFlowy page, Markdown files become child pages, and local image references are uploaded and inserted in place."
+        description = "Recursively import a local Markdown directory into AppFlowy. Every local folder becomes an AppFlowy page, Markdown files become child pages, and local image references are uploaded and inserted in place.",
+        annotations(title = "Import markdown directory", open_world_hint = true)
     )]
     async fn appflowy_import_markdown_directory(
         &self,
         Parameters(request): Parameters<ImportMarkdownDirectoryRequest>,
+        context: RequestContext<RoleServer>,
     ) -> Result<Json<Value>, ToolError> {
         require_non_empty(&request.workspace_id, "workspace_id")?;
         require_non_empty(&request.parent_view_id, "parent_view_id")?;
@@ -484,6 +495,8 @@ impl AppServer {
             .map_err(map_tool_error)?;
         // Fresh importer per call: its accumulation state is per-import.
         let mut importer = MarkdownImporter::new(self.client.clone(), request.workspace_id.clone());
+        // Notifications fire only when the call's _meta carries a progressToken.
+        importer.set_progress(ToolProgress::from_context(&context));
         let summary = importer
             .import_directory(
                 &request.path,

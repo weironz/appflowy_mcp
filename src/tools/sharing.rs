@@ -113,11 +113,30 @@ fn find_view_ancestors<'a>(
     found
 }
 
+/// `appflowy_get_page_access_details` output (appflowy_web
+/// `ShareAccessDetails`): who the page is shared with, optional group
+/// permissions, and the caller's own permission. Only `shared_with` is
+/// guaranteed across both the v2 endpoint and the legacy fallback; unlisted
+/// keys are allowed.
+#[derive(Debug, rmcp::schemars::JsonSchema)]
+pub struct PageAccessDetailsOutput {
+    /// People/guests with access to the page (email, name, permission).
+    pub shared_with: Vec<std::collections::HashMap<String, Value>>,
+    /// Workspace groups with access to the page.
+    pub groups: Option<Vec<std::collections::HashMap<String, Value>>>,
+    /// The requesting user's own permission on the page.
+    pub current_user_permission: Option<Value>,
+    pub view_id: Option<String>,
+    /// Access target descriptor (`{type, page_id}`) of the v2 response.
+    pub target: Option<Value>,
+}
+
 #[tool_router(router = sharing_tool_router, vis = "pub(crate)")]
 impl AppServer {
     #[tool(
         name = "appflowy_share_page",
-        description = "Share a page with specific people by email, granting them access to it inside the workspace. This differs from publishing a public link (use the publish tools for that). access_level uses the AppFlowy AccessLevel ints (AppFlowy-Web types.ts): 10 = ReadOnly (default), 20 = ReadAndComment, 30 = ReadAndWrite, 50 = FullAccess."
+        description = "Share a page with specific people by email, granting them access to it inside the workspace. This differs from publishing a public link (use the publish tools for that). access_level uses the AppFlowy AccessLevel ints (AppFlowy-Web types.ts): 10 = ReadOnly (default), 20 = ReadAndComment, 30 = ReadAndWrite, 50 = FullAccess.",
+        annotations(title = "Share page", open_world_hint = true)
     )]
     async fn appflowy_share_page(
         &self,
@@ -157,7 +176,12 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_revoke_page_access",
-        description = "Revoke access to a page for specific people by email."
+        description = "Revoke access to a page for specific people by email.",
+        annotations(
+            title = "Revoke page access",
+            destructive_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn appflowy_revoke_page_access(
         &self,
@@ -187,7 +211,14 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_get_page_access_details",
-        description = "Get who has access to a page (people, groups, and the current user's permission). Tries the v2 endpoint first and falls back to the legacy access-details endpoint on HTTP 404/405, computing the page's ancestor view chain from the workspace folder tree. The API response is passed through."
+        description = "Get who has access to a page (people, groups, and the current user's permission). Tries the v2 endpoint first and falls back to the legacy access-details endpoint on HTTP 404/405, computing the page's ancestor view chain from the workspace folder tree. The API response is passed through.",
+        output_schema = rmcp::handler::server::tool::schema_for_output::<PageAccessDetailsOutput>(),
+        annotations(
+            title = "Get page access details",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn appflowy_get_page_access_details(
         &self,
@@ -244,7 +275,8 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_request_access",
-        description = "Request access to a page in a workspace (asks the page's owners for permission)."
+        description = "Request access to a page in a workspace (asks the page's owners for permission).",
+        annotations(title = "Request access", open_world_hint = true)
     )]
     async fn appflowy_request_access(
         &self,
@@ -269,7 +301,13 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_get_access_request",
-        description = "Get the details/status of an access request. The API response is passed through."
+        description = "Get the details/status of an access request. The API response is passed through.",
+        annotations(
+            title = "Get access request",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn appflowy_get_access_request(
         &self,
@@ -291,7 +329,8 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_approve_access_request",
-        description = "Approve a pending access request, granting the requester access to the page."
+        description = "Approve a pending access request, granting the requester access to the page.",
+        annotations(title = "Approve access request", open_world_hint = true)
     )]
     async fn appflowy_approve_access_request(
         &self,
@@ -315,7 +354,13 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_list_shared_with_me",
-        description = "List pages shared with the current user in a workspace (the 'Shared with me' section). The API response is passed through."
+        description = "List pages shared with the current user in a workspace (the 'Shared with me' section). The API response is passed through.",
+        annotations(
+            title = "List shared with me",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn appflowy_list_shared_with_me(
         &self,

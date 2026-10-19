@@ -30,7 +30,8 @@ pub struct RefreshTokenRequest {
 impl AppServer {
     #[tool(
         name = "appflowy_login",
-        description = "Login to AppFlowy. Tokens are stored in the server; they are not returned to avoid leaking credentials into tool output."
+        description = "Login to AppFlowy. Tokens are stored in the server; they are not returned to avoid leaking credentials into tool output.",
+        annotations(title = "Login", open_world_hint = true)
     )]
     async fn appflowy_login(
         &self,
@@ -53,7 +54,8 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_refresh_token",
-        description = "Refresh the access token. Uses the stored refresh token unless one is provided. Tokens are not returned."
+        description = "Refresh the access token. Uses the stored refresh token unless one is provided. Tokens are not returned.",
+        annotations(title = "Refresh token", open_world_hint = true)
     )]
     async fn appflowy_refresh_token(
         &self,

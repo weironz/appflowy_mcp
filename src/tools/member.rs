@@ -125,7 +125,8 @@ pub struct AcceptInvitationParams {
 impl AppServer {
     #[tool(
         name = "appflowy_create_workspace",
-        description = "Create a new workspace."
+        description = "Create a new workspace.",
+        annotations(title = "Create workspace", open_world_hint = true)
     )]
     async fn appflowy_create_workspace(
         &self,
@@ -155,7 +156,8 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_update_workspace",
-        description = "Update a workspace name and/or icon."
+        description = "Update a workspace name and/or icon.",
+        annotations(title = "Update workspace", open_world_hint = true)
     )]
     async fn appflowy_update_workspace(
         &self,
@@ -183,7 +185,12 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_delete_workspace",
-        description = "Permanently delete a workspace and everything in it. Irreversible."
+        description = "Permanently delete a workspace and everything in it. Irreversible.",
+        annotations(
+            title = "Delete workspace",
+            destructive_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn appflowy_delete_workspace(
         &self,
@@ -203,7 +210,12 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_leave_workspace",
-        description = "Leave a workspace you are a member of."
+        description = "Leave a workspace you are a member of.",
+        annotations(
+            title = "Leave workspace",
+            destructive_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn appflowy_leave_workspace(
         &self,
@@ -224,7 +236,13 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_get_workspace_settings",
-        description = "Get workspace settings (search indexing, AI model)."
+        description = "Get workspace settings (search indexing, AI model).",
+        annotations(
+            title = "Get workspace settings",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn appflowy_get_workspace_settings(
         &self,
@@ -245,7 +263,8 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_update_workspace_settings",
-        description = "Update workspace settings: disable_search_indexing and/or ai_model."
+        description = "Update workspace settings: disable_search_indexing and/or ai_model.",
+        annotations(title = "Update workspace settings", open_world_hint = true)
     )]
     async fn appflowy_update_workspace_settings(
         &self,
@@ -269,7 +288,13 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_get_workspace_usage",
-        description = "Get workspace storage usage (consumed capacity in bytes)."
+        description = "Get workspace storage usage (consumed capacity in bytes).",
+        annotations(
+            title = "Get workspace usage",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn appflowy_get_workspace_usage(
         &self,
@@ -290,7 +315,13 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_list_members",
-        description = "List members of a workspace with their roles."
+        description = "List members of a workspace with their roles. Returns personal data (names/emails); share within workspace permissions only.",
+        annotations(
+            title = "List members",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn appflowy_list_members(
         &self,
@@ -311,7 +342,8 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_update_member",
-        description = "Update a workspace member's role (Owner, Member, Guest) or name."
+        description = "Update a workspace member's role (Owner, Member, Guest) or name.",
+        annotations(title = "Update member", open_world_hint = true)
     )]
     async fn appflowy_update_member(
         &self,
@@ -339,7 +371,12 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_remove_members",
-        description = "Remove members from a workspace by email."
+        description = "Remove members from a workspace by email.",
+        annotations(
+            title = "Remove members",
+            destructive_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn appflowy_remove_members(
         &self,
@@ -370,7 +407,8 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_invite_members",
-        description = "Invite people to a workspace by email with a role (Owner, Member, Guest)."
+        description = "Invite people to a workspace by email with a role (Owner, Member, Guest).",
+        annotations(title = "Invite members", open_world_hint = true)
     )]
     async fn appflowy_invite_members(
         &self,
@@ -410,7 +448,13 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_list_invitations",
-        description = "List workspace invitations sent to the authenticated user, optionally filtered by status (Pending, Accepted, Rejected)."
+        description = "List workspace invitations sent to the authenticated user, optionally filtered by status (Pending, Accepted, Rejected). Returns personal data (names/emails); share within workspace permissions only.",
+        annotations(
+            title = "List invitations",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn appflowy_list_invitations(
         &self,
@@ -433,7 +477,8 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_accept_invitation",
-        description = "Accept a workspace invitation by invite_id."
+        description = "Accept a workspace invitation by invite_id.",
+        annotations(title = "Accept invitation", open_world_hint = true)
     )]
     async fn appflowy_accept_invitation(
         &self,
@@ -454,7 +499,13 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_get_user_profile",
-        description = "Get the authenticated user's profile (uid, email, name, latest workspace)."
+        description = "Get the authenticated user's profile (uid, email, name, latest workspace). Returns personal data (names/emails); share within workspace permissions only.",
+        annotations(
+            title = "Get user profile",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn appflowy_get_user_profile(&self) -> Result<Json<Value>, ToolError> {
         let data = self

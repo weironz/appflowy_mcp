@@ -123,7 +123,8 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_update_document_block",
-        description = "Replace the ENTIRE text of one document block (gray semantics: whole-paragraph replacement, NOT an incremental/caret edit) through the document collab, the way the webclient edits save. `text` is parsed with markdown inline semantics (**bold**, *italic*, ~~strike~~, `code`, [label](url)); formatting the new text does not re-declare is dropped. Only text-bearing block types are supported: paragraph, heading, quote, todo_list, bulleted_list, numbered_list — anything else is rejected without writing. An empty `text` clears the block. Pass `snapshot_path` to save the pre-edit state for appflowy_restore_document_snapshot before the change."
+        description = "Replace the ENTIRE text of one document block (gray semantics: whole-paragraph replacement, NOT an incremental/caret edit) through the document collab, the way the webclient edits save. `text` is parsed with markdown inline semantics (**bold**, *italic*, ~~strike~~, `code`, [label](url)); formatting the new text does not re-declare is dropped. Only text-bearing block types are supported: paragraph, heading, quote, todo_list, bulleted_list, numbered_list — anything else is rejected without writing. An empty `text` clears the block. Pass `snapshot_path` to save the pre-edit state for appflowy_restore_document_snapshot before the change.",
+        annotations(title = "Update document block", open_world_hint = true)
     )]
     async fn appflowy_update_document_block(
         &self,
@@ -168,7 +169,12 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_delete_document_block",
-        description = "Detach a block from its parent's children list through the document collab (gray semantics: the block record and its subtree stay in the collab as unreachable orphans — this is the conservative form of the GUI's delete, with no recursive cleanup — so only an older snapshot can bring it back). Nested list items work: whichever children array holds the id is edited. Pass `snapshot_path` to save the pre-edit state for appflowy_restore_document_snapshot before the change."
+        description = "Detach a block from its parent's children list through the document collab (gray semantics: the block record and its subtree stay in the collab as unreachable orphans — this is the conservative form of the GUI's delete, with no recursive cleanup — so only an older snapshot can bring it back). Nested list items work: whichever children array holds the id is edited. Pass `snapshot_path` to save the pre-edit state for appflowy_restore_document_snapshot before the change.",
+        annotations(
+            title = "Delete document block",
+            destructive_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn appflowy_delete_document_block(
         &self,
@@ -214,7 +220,8 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_snapshot_document",
-        description = "Save a page's FULL document state (base64 doc_state plus timestamp) to a local file — the rollback anchor for document edits. The collab edit tools also accept `snapshot_path` to do this inline before mutating; restore with appflowy_restore_document_snapshot. The whole state costs the full collab size (unlike per-edit diffs), so use it per decision point, not per keystroke."
+        description = "Save a page's FULL document state (base64 doc_state plus timestamp) to a local file — the rollback anchor for document edits. The collab edit tools also accept `snapshot_path` to do this inline before mutating; restore with appflowy_restore_document_snapshot. The whole state costs the full collab size (unlike per-edit diffs), so use it per decision point, not per keystroke.",
+        annotations(title = "Snapshot document", open_world_hint = true)
     )]
     async fn appflowy_snapshot_document(
         &self,
@@ -243,7 +250,12 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_restore_document_snapshot",
-        description = "Restore the visible document body to a saved snapshot's content (CRDT-honest semantics — NOT a merge and NOT a raw state push-back, which cannot revive tombstoned content): every current root block is detached into invisible history and the snapshot is rebuilt from its decoded markdown as entirely fresh blocks (fresh ids). Later edits made after the snapshot is gone from view; invisible CRDT history is preserved. Fresh rebuild instantiates new yjs items, so afterwards the visible document equals the snapshot. `page_id` must match the snapshot's."
+        description = "Restore the visible document body to a saved snapshot's content (CRDT-honest semantics — NOT a merge and NOT a raw state push-back, which cannot revive tombstoned content): every current root block is detached into invisible history and the snapshot is rebuilt from its decoded markdown as entirely fresh blocks (fresh ids). Later edits made after the snapshot is gone from view; invisible CRDT history is preserved. Fresh rebuild instantiates new yjs items, so afterwards the visible document equals the snapshot. `page_id` must match the snapshot's.",
+        annotations(
+            title = "Restore document snapshot",
+            destructive_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn appflowy_restore_document_snapshot(
         &self,

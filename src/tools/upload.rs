@@ -31,7 +31,8 @@ pub struct UploadFileRequest {
 impl AppServer {
     #[tool(
         name = "appflowy_upload_file",
-        description = "Upload a local file to AppFlowy file storage and return its URL, which can be referenced from image or file blocks in pages. Files of 5 MB or larger are uploaded as multipart chunks automatically (parallel parts with per-part retries); smaller files go in a single request."
+        description = "Upload a local file to AppFlowy file storage and return its URL, which can be referenced from image or file blocks in pages. Files of 5 MB or larger are uploaded as multipart chunks automatically (parallel parts with per-part retries); smaller files go in a single request.",
+        annotations(title = "Upload file", open_world_hint = true)
     )]
     async fn appflowy_upload_file(
         &self,

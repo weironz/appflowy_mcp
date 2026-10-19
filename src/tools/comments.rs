@@ -135,11 +135,32 @@ pub struct NotifyRowCommentRequest {
     pub view_name: Option<String>,
 }
 
+/// `appflowy_list_inline_comments` output envelope: one page of inline
+/// (review/annotation) comments plus the pagination cursor.
+/// `comments` is guaranteed; `next_offset` is null/absent once
+/// `has_more` is false; unlisted keys are allowed.
+#[derive(Debug, rmcp::schemars::JsonSchema)]
+pub struct ListInlineCommentsOutput {
+    /// The current page of inline comment objects.
+    pub comments: Vec<std::collections::HashMap<String, Value>>,
+    /// True while more pages exist (call again with `offset`).
+    pub has_more: Option<bool>,
+    /// Offset to pass for the next page.
+    pub next_offset: Option<i64>,
+}
+
 #[tool_router(router = comments_tool_router, vis = "pub(crate)")]
 impl AppServer {
     #[tool(
         name = "appflowy_list_inline_comments",
-        description = "List review/annotation comments of a document page (inline comments attached to blocks, as opposed to public comments on published pages). The response contains `comments`, `has_more`, and `next_offset`: while `has_more` is true, call again with `offset` set to the returned `next_offset` to page through the list."
+        description = "List review/annotation comments of a document page (inline comments attached to blocks, as opposed to public comments on published pages). The response contains `comments`, `has_more`, and `next_offset`: while `has_more` is true, call again with `offset` set to the returned `next_offset` to page through the list. Returns personal data (names/emails); share within workspace permissions only.",
+        output_schema = rmcp::handler::server::tool::schema_for_output::<ListInlineCommentsOutput>(),
+        annotations(
+            title = "List inline comments",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn appflowy_list_inline_comments(
         &self,
@@ -165,7 +186,8 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_add_inline_comment",
-        description = "Add a review/annotation comment to a document page: anchor it to a block via `block_id`, or reply to an existing thread via `reply_comment_id` (distinct from public comments on published pages). Returns `{comment_id}`; on servers without the v2 endpoint it falls back to the legacy endpoint and returns `{status: \"created\"}` instead."
+        description = "Add a review/annotation comment to a document page: anchor it to a block via `block_id`, or reply to an existing thread via `reply_comment_id` (distinct from public comments on published pages). Returns `{comment_id}`; on servers without the v2 endpoint it falls back to the legacy endpoint and returns `{status: \"created\"}` instead.",
+        annotations(title = "Add inline comment", open_world_hint = true)
     )]
     async fn appflowy_add_inline_comment(
         &self,
@@ -211,7 +233,8 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_resolve_inline_comment",
-        description = "Mark a document-page review comment (thread) as resolved (is_resolved=true) or reopen it (is_resolved=false). Inline comments are page annotations, not public comments on published pages."
+        description = "Mark a document-page review comment (thread) as resolved (is_resolved=true) or reopen it (is_resolved=false). Inline comments are page annotations, not public comments on published pages.",
+        annotations(title = "Resolve inline comment", open_world_hint = true)
     )]
     async fn appflowy_resolve_inline_comment(
         &self,
@@ -243,7 +266,12 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_delete_inline_comment",
-        description = "Delete a review/annotation comment from a document page (inline comment, not a public comment on a published page)."
+        description = "Delete a review/annotation comment from a document page (inline comment, not a public comment on a published page).",
+        annotations(
+            title = "Delete inline comment",
+            destructive_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn appflowy_delete_inline_comment(
         &self,
@@ -269,7 +297,13 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_list_inline_comment_reactions",
-        description = "List emoji-style reactions on the review/annotation comments of a document page; pass `comment_id` to restrict to one thread. Returns `{reactions: [{reaction_type, react_users, comment_id}]}`."
+        description = "List emoji-style reactions on the review/annotation comments of a document page; pass `comment_id` to restrict to one thread. Returns `{reactions: [{reaction_type, react_users, comment_id}]}`.",
+        annotations(
+            title = "List inline comment reactions",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn appflowy_list_inline_comment_reactions(
         &self,
@@ -299,7 +333,8 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_add_inline_comment_reaction",
-        description = "Add an emoji-style reaction to a review/annotation comment on a document page."
+        description = "Add an emoji-style reaction to a review/annotation comment on a document page.",
+        annotations(title = "Add inline comment reaction", open_world_hint = true)
     )]
     async fn appflowy_add_inline_comment_reaction(
         &self,
@@ -332,7 +367,12 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_delete_inline_comment_reaction",
-        description = "Remove an emoji-style reaction previously added to a review/annotation comment on a document page."
+        description = "Remove an emoji-style reaction previously added to a review/annotation comment on a document page.",
+        annotations(
+            title = "Delete inline comment reaction",
+            destructive_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn appflowy_delete_inline_comment_reaction(
         &self,
@@ -365,7 +405,8 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_notify_row_comment",
-        description = "Send the AppFlowy notification for a comment posted on a database row (mentions, replies, thread participants). Call this after creating the row comment itself so mentioned users and participants get notified."
+        description = "Send the AppFlowy notification for a comment posted on a database row (mentions, replies, thread participants). Call this after creating the row comment itself so mentioned users and participants get notified.",
+        annotations(title = "Notify row comment", open_world_hint = true)
     )]
     async fn appflowy_notify_row_comment(
         &self,

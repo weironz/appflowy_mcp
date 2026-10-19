@@ -42,11 +42,38 @@ pub struct SearchSummaryRequest {
     pub only_context: Option<bool>,
 }
 
+/// Element of the `appflowy_search` output (AppFlowy-Cloud
+/// `SearchDocumentResponseItem`): one matched document, sorted by `score`.
+/// Only `object_id` is guaranteed; unlisted keys are allowed.
+#[derive(Debug, rmcp::schemars::JsonSchema)]
+pub struct SearchResultOutput {
+    /// Object id of the matched document (its page view_id).
+    pub object_id: String,
+    pub workspace_id: Option<String>,
+    /// Cosine-distance match score, higher is better.
+    pub score: Option<f64>,
+    /// Full indexed content of the matched document.
+    pub content: Option<String>,
+    /// Short preview of the matching content.
+    pub preview: Option<String>,
+    /// 0 = plain text, other values per the server's SearchContentType.
+    pub content_type: Option<i64>,
+    pub created_by: Option<String>,
+    pub created_at: Option<String>,
+}
+
 #[tool_router(router = search_tool_router, vis = "pub(crate)")]
 impl AppServer {
     #[tool(
         name = "appflowy_search",
-        description = "Search documents in a workspace by keyword or natural-language query (full-text plus semantic search when the server has indexing enabled). Returns matching documents with object_id (the page view_id), preview, and score."
+        description = "Search documents in a workspace by keyword or natural-language query (full-text plus semantic search when the server has indexing enabled). Returns matching documents with object_id (the page view_id), preview, and score.",
+        output_schema = rmcp::handler::server::tool::schema_for_output::<Vec<SearchResultOutput>>(),
+        annotations(
+            title = "Search",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn appflowy_search(
         &self,
@@ -75,7 +102,13 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_search_summary",
-        description = "Search the workspace and return an AI-generated, cited summary that answers the query over the matched documents. Runs a document search first, then summarizes the results (each summary lists its source object_ids)."
+        description = "Search the workspace and return an AI-generated, cited summary that answers the query over the matched documents. Runs a document search first, then summarizes the results (each summary lists its source object_ids).",
+        annotations(
+            title = "Search summary",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn appflowy_search_summary(
         &self,

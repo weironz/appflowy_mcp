@@ -61,7 +61,8 @@ pub struct ChatAskRequest {
 impl AppServer {
     #[tool(
         name = "appflowy_create_chat",
-        description = "Create an AI chat in a workspace. Optionally pass rag_ids (page view ids) the AI should use as context. Returns the chat_id for follow-up calls."
+        description = "Create an AI chat in a workspace. Optionally pass rag_ids (page view ids) the AI should use as context. Returns the chat_id for follow-up calls.",
+        annotations(title = "Create chat", open_world_hint = true)
     )]
     async fn appflowy_create_chat(
         &self,
@@ -96,7 +97,11 @@ impl AppServer {
         })))
     }
 
-    #[tool(name = "appflowy_delete_chat", description = "Delete an AI chat.")]
+    #[tool(
+        name = "appflowy_delete_chat",
+        description = "Delete an AI chat.",
+        annotations(title = "Delete chat", destructive_hint = true, open_world_hint = true)
+    )]
     async fn appflowy_delete_chat(
         &self,
         Parameters(request): Parameters<ChatIdRequest>,
@@ -115,7 +120,13 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_get_chat_settings",
-        description = "Get an AI chat's settings (name, rag_ids, metadata)."
+        description = "Get an AI chat's settings (name, rag_ids, metadata).",
+        annotations(
+            title = "Get chat settings",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn appflowy_get_chat_settings(
         &self,
@@ -139,7 +150,8 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_update_chat_settings",
-        description = "Update an AI chat's name, rag_ids, or metadata."
+        description = "Update an AI chat's name, rag_ids, or metadata.",
+        annotations(title = "Update chat settings", open_world_hint = true)
     )]
     async fn appflowy_update_chat_settings(
         &self,
@@ -174,7 +186,13 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_list_chat_messages",
-        description = "List messages in an AI chat, newest first. Use limit to bound the page size and before_message_id to page backwards through history."
+        description = "List messages in an AI chat, newest first. Use limit to bound the page size and before_message_id to page backwards through history. Returns personal data (names/emails); share within workspace permissions only.",
+        annotations(
+            title = "List chat messages",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn appflowy_list_chat_messages(
         &self,
@@ -203,7 +221,8 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_chat_ask",
-        description = "Ask the workspace AI a question in an existing chat and wait for the answer (non-streaming). Returns both the question message id and the AI answer. Create a chat first with appflowy_create_chat."
+        description = "Ask the workspace AI a question in an existing chat and wait for the answer (non-streaming). Returns both the question message id and the AI answer. Create a chat first with appflowy_create_chat.",
+        annotations(title = "Chat ask", open_world_hint = true)
     )]
     async fn appflowy_chat_ask(
         &self,

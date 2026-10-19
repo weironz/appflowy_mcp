@@ -150,7 +150,13 @@ async fn upload_audio(
 impl AppServer {
     #[tool(
         name = "appflowy_meeting_usage",
-        description = "Get workspace usage and limits (meeting transcription quota is included in this payload)."
+        description = "Get workspace usage and limits (meeting transcription quota is included in this payload).",
+        annotations(
+            title = "Meeting usage",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn appflowy_meeting_usage(
         &self,
@@ -171,7 +177,8 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_meeting_transcribe",
-        description = "Start an AI meeting-audio transcription. Provide either `audio_url` (already downloadable) or `path` (a local audio file, uploaded to file storage first). Returns the queued transcript ({id, status, ...}); poll appflowy_meeting_get_transcript for completion."
+        description = "Start an AI meeting-audio transcription. Provide either `audio_url` (already downloadable) or `path` (a local audio file, uploaded to file storage first). Returns the queued transcript ({id, status, ...}); poll appflowy_meeting_get_transcript for completion.",
+        annotations(title = "Meeting transcribe", open_world_hint = true)
     )]
     async fn appflowy_meeting_transcribe(
         &self,
@@ -221,7 +228,13 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_meeting_get_transcript",
-        description = "Get a meeting transcript record ({id, status, ...}). Status flows queued -> processing -> completed (or error); poll this tool until status is completed."
+        description = "Get a meeting transcript record ({id, status, ...}). Status flows queued -> processing -> completed (or error); poll this tool until status is completed.",
+        annotations(
+            title = "Meeting get transcript",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn appflowy_meeting_get_transcript(
         &self,
@@ -246,7 +259,13 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_meeting_get_paragraphs",
-        description = "Get a meeting transcript's paragraphs with word-level timestamps (available once transcription completes)."
+        description = "Get a meeting transcript's paragraphs with word-level timestamps (available once transcription completes).",
+        annotations(
+            title = "Meeting get paragraphs",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn appflowy_meeting_get_paragraphs(
         &self,
@@ -271,7 +290,12 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_meeting_delete_transcript",
-        description = "Delete a meeting transcript."
+        description = "Delete a meeting transcript.",
+        annotations(
+            title = "Meeting delete transcript",
+            destructive_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn appflowy_meeting_delete_transcript(
         &self,

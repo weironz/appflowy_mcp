@@ -69,11 +69,41 @@ pub struct DeleteQuickNoteRequest {
     pub quick_note_id: String,
 }
 
+/// `appflowy_list_quick_notes` output (AppFlowy-Cloud `QuickNotes`): one
+/// page of notes plus the page-through flag. `quick_notes` is guaranteed;
+/// unlisted keys are allowed.
+#[derive(Debug, rmcp::schemars::JsonSchema)]
+pub struct ListQuickNotesOutput {
+    /// The current page of quick notes.
+    pub quick_notes: Vec<QuickNoteOutput>,
+    /// True while more pages exist (advance with `offset`).
+    pub has_more: Option<bool>,
+}
+
+/// One quick note (AppFlowy-Cloud `QuickNote`). Only `id` is guaranteed;
+/// unlisted keys are allowed.
+#[derive(Debug, rmcp::schemars::JsonSchema)]
+pub struct QuickNoteOutput {
+    /// Quick note id (uuid).
+    pub id: String,
+    /// Block-list JSON payload of the note.
+    pub data: Option<Value>,
+    pub created_at: Option<String>,
+    pub last_updated_at: Option<String>,
+}
+
 #[tool_router(router = quicknotes_tool_router, vis = "pub(crate)")]
 impl AppServer {
     #[tool(
         name = "appflowy_list_quick_notes",
-        description = "List quick notes in a workspace, with optional search and pagination."
+        description = "List quick notes in a workspace, with optional search and pagination.",
+        output_schema = rmcp::handler::server::tool::schema_for_output::<ListQuickNotesOutput>(),
+        annotations(
+            title = "List quick notes",
+            read_only_hint = true,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn appflowy_list_quick_notes(
         &self,
@@ -110,7 +140,8 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_create_quick_note",
-        description = "Create a quick note from plain text (or raw block data)."
+        description = "Create a quick note from plain text (or raw block data).",
+        annotations(title = "Create quick note", open_world_hint = true)
     )]
     async fn appflowy_create_quick_note(
         &self,
@@ -137,7 +168,8 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_update_quick_note",
-        description = "Replace a quick note's content with plain text (or raw block data)."
+        description = "Replace a quick note's content with plain text (or raw block data).",
+        annotations(title = "Update quick note", open_world_hint = true)
     )]
     async fn appflowy_update_quick_note(
         &self,
@@ -162,7 +194,12 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_delete_quick_note",
-        description = "Delete a quick note."
+        description = "Delete a quick note.",
+        annotations(
+            title = "Delete quick note",
+            destructive_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn appflowy_delete_quick_note(
         &self,

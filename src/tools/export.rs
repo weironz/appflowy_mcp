@@ -39,7 +39,8 @@ use std::sync::Arc;
 use percent_encoding::percent_decode_str;
 use reqwest::Method;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::{tool, tool_router, Json};
+use rmcp::service::RequestContext;
+use rmcp::{tool, tool_router, Json, RoleServer};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::sync::Semaphore;
@@ -51,7 +52,7 @@ use crate::collab::decode_document;
 use crate::error::{Error, Result};
 use crate::render::{document_to_markdown, sanitize_filename};
 use crate::server::AppServer;
-use crate::tools::util::{map_tool_error, unique_path, ToolError};
+use crate::tools::util::{map_tool_error, unique_path, ToolError, ToolProgress};
 
 /// Upper bound on concurrent page fetches during a tree export.
 /// Python: `EXPORT_MAX_WORKERS = 8`.
@@ -578,16 +579,19 @@ pub async fn prefetch_page_markdowns(
             (view_id, name)
         })
         .collect();
-    prefetch_docs(client, workspace_id, &docs).await
+    prefetch_docs(client, workspace_id, &docs, &ToolProgress::inactive()).await
 }
 
 /// Concurrency core of [`prefetch_page_markdowns`], parameterized on the
 /// explicit page list so incremental exports can prefetch only the pages
-/// that actually changed.
+/// that actually changed. One progress tick fires per joined page fetch
+/// (`exporting done/total pages`); an inert `progress` (no client token)
+/// keeps the loop notification-free.
 async fn prefetch_docs(
     client: &AppFlowyClient,
     workspace_id: &str,
     docs: &[(String, String)],
+    progress: &ToolProgress,
 ) -> PrefetchCache {
     let mut cache = HashMap::new();
     if docs.is_empty() {
@@ -620,6 +624,8 @@ async fn prefetch_docs(
             (view_id, result)
         });
     }
+    let total = docs.len();
+    let mut done = 0usize;
     while let Some(joined) = set.join_next().await {
         match joined {
             Ok((view_id, result)) => {
@@ -627,6 +633,8 @@ async fn prefetch_docs(
             }
             Err(e) => tracing::warn!(%e, "prefetch task failed to join"),
         }
+        done += 1;
+        progress.report(done, total, "exporting").await;
     }
     cache
 }
@@ -979,12 +987,17 @@ pub async fn export_views_to_directory(
         exported,
         warnings,
         None,
+        &ToolProgress::inactive(),
     )
     .await
 }
 
 /// [`export_views_to_directory`] plus a `skipped_unchanged` count: how many
 /// pages were left untouched because the manifest showed them unchanged.
+/// `progress` feeds one `notifications/progress` per prefetched page (pages
+/// skipped as unchanged never fetched, so they never tick); pass
+/// `&ToolProgress::inactive()` when the client asked for none.
+#[allow(clippy::too_many_arguments)]
 pub async fn export_views_to_directory_stats(
     client: &AppFlowyClient,
     workspace_id: &str,
@@ -993,6 +1006,7 @@ pub async fn export_views_to_directory_stats(
     exported: &mut Vec<String>,
     warnings: &mut Vec<String>,
     skipped: Option<&mut usize>,
+    progress: &ToolProgress,
 ) -> Result<()> {
     let manifest = load_manifest(directory, workspace_id, warnings);
     let mut occupancy = HashSet::new();
@@ -1005,7 +1019,7 @@ pub async fn export_views_to_directory_stats(
         warnings,
     );
     let docs = collect_planned_fetches(&plans);
-    let cache = prefetch_docs(client, workspace_id, &docs).await;
+    let cache = prefetch_docs(client, workspace_id, &docs, progress).await;
     let mut skipped_count = 0usize;
     let mut pages = BTreeMap::new();
     execute_page_plans(
@@ -1131,7 +1145,8 @@ fn content_disposition_filename(headers: &reqwest::header::HeaderMap) -> Option<
 impl AppServer {
     #[tool(
         name = "appflowy_export_page",
-        description = "Export a single page as a local Markdown file, preserving inline formatting (bold, italic, links, code). Child pages are not included; use appflowy_export_space for a whole subtree."
+        description = "Export a single page as a local Markdown file, preserving inline formatting (bold, italic, links, code). Child pages are not included; use appflowy_export_space for a whole subtree.",
+        annotations(title = "Export page", open_world_hint = true)
     )]
     async fn appflowy_export_page(
         &self,
@@ -1218,12 +1233,15 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_export_space",
-        description = "Export a space (or any page subtree) to a local directory of Markdown files, mirroring appflowy_import_markdown_directory: a page with children becomes a folder whose own content is README.md, leaf pages become .md files. Non-document views (grids, boards) are skipped with warnings. Incremental: the directory keeps a .appflowy-export-manifest.json; re-exporting into it skips pages unchanged since (tracked by last_edited_time) in skipped_unchanged, and never deletes older files."
+        description = "Export a space (or any page subtree) to a local directory of Markdown files, mirroring appflowy_import_markdown_directory: a page with children becomes a folder whose own content is README.md, leaf pages become .md files. Non-document views (grids, boards) are skipped with warnings. Incremental: the directory keeps a .appflowy-export-manifest.json; re-exporting into it skips pages unchanged since (tracked by last_edited_time) in skipped_unchanged, and never deletes older files.",
+        annotations(title = "Export space", open_world_hint = true)
     )]
     async fn appflowy_export_space(
         &self,
         Parameters(params): Parameters<ExportSpaceParams>,
+        context: RequestContext<RoleServer>,
     ) -> std::result::Result<Json<Value>, ToolError> {
+        let progress = ToolProgress::from_context(&context);
         // Destination validation is a parameter error and must fire before
         // any network request (Python rewrapped it as a generic error).
         let directory = prepare_destination_directory(&params.request.path, &params.workspace_id)
@@ -1259,6 +1277,7 @@ impl AppServer {
                 &mut exported,
                 &mut warnings,
                 Some(&mut skipped_unchanged),
+                &progress,
             )
             .await?;
             Ok::<Value, Error>(json!({
@@ -1274,12 +1293,15 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_export_workspace",
-        description = "Export every space in a workspace to a local directory tree of Markdown files. Each space becomes a top-level folder; pages follow the appflowy_export_space layout. Incremental: the directory keeps a .appflowy-export-manifest.json; re-exporting into it skips pages unchanged since (tracked by last_edited_time) in skipped_unchanged, and never deletes older files."
+        description = "Export every space in a workspace to a local directory tree of Markdown files. Each space becomes a top-level folder; pages follow the appflowy_export_space layout. Incremental: the directory keeps a .appflowy-export-manifest.json; re-exporting into it skips pages unchanged since (tracked by last_edited_time) in skipped_unchanged, and never deletes older files.",
+        annotations(title = "Export workspace", open_world_hint = true)
     )]
     async fn appflowy_export_workspace(
         &self,
         Parameters(params): Parameters<ExportWorkspaceParams>,
+        context: RequestContext<RoleServer>,
     ) -> std::result::Result<Json<Value>, ToolError> {
+        let progress = ToolProgress::from_context(&context);
         let directory = prepare_destination_directory(&params.request.path, &params.workspace_id)
             .map_err(map_tool_error)?;
         let run = async {
@@ -1316,6 +1338,7 @@ impl AppServer {
                 &mut exported,
                 &mut warnings,
                 Some(&mut skipped_unchanged),
+                &progress,
             )
             .await?;
             Ok::<Value, Error>(json!({
@@ -1333,7 +1356,8 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_export_pdf",
-        description = "Export a page as a PDF rendered by the AppFlowy server (commercial cloud). Server-side rendering preserves the original layout far more faithfully than appflowy_export_page's Markdown conversion (nested pages, databases, images). The binary PDF is saved to a local file; parent directories are created and an existing file is never overwritten (' (n)' appended)."
+        description = "Export a page as a PDF rendered by the AppFlowy server (commercial cloud). Server-side rendering preserves the original layout far more faithfully than appflowy_export_page's Markdown conversion (nested pages, databases, images). The binary PDF is saved to a local file; parent directories are created and an existing file is never overwritten (' (n)' appended).",
+        annotations(title = "Export pdf", open_world_hint = true)
     )]
     async fn appflowy_export_pdf(
         &self,
@@ -1418,7 +1442,8 @@ impl AppServer {
 
     #[tool(
         name = "appflowy_export_workspace_zip",
-        description = "Request a full-workspace ZIP backup from the AppFlowy server (commercial cloud). Owner-only endpoint: the archive is built asynchronously and the server emails the workspace owner a download link when it is ready — this call returns the task id, not the archive itself."
+        description = "Request a full-workspace ZIP backup from the AppFlowy server (commercial cloud). Owner-only endpoint: the archive is built asynchronously and the server emails the workspace owner a download link when it is ready — this call returns the task id, not the archive itself.",
+        annotations(title = "Export workspace zip", open_world_hint = true)
     )]
     async fn appflowy_export_workspace_zip(
         &self,
@@ -1864,6 +1889,7 @@ mod tests {
             &mut exported,
             &mut warnings,
             Some(&mut skipped),
+            &ToolProgress::inactive(),
         )
         .await
         .unwrap();
@@ -1911,6 +1937,7 @@ mod tests {
             &mut exported,
             &mut warnings,
             Some(&mut skipped),
+            &ToolProgress::inactive(),
         )
         .await
         .unwrap();
@@ -1979,6 +2006,7 @@ mod tests {
             &mut exported,
             &mut warnings,
             Some(&mut skipped),
+            &ToolProgress::inactive(),
         )
         .await
         .unwrap();
@@ -2002,6 +2030,7 @@ mod tests {
             &mut exported,
             &mut warnings,
             Some(&mut skipped),
+            &ToolProgress::inactive(),
         )
         .await
         .unwrap();

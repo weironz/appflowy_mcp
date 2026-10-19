@@ -1,13 +1,16 @@
 //! Helpers shared by the tool modules.
 
+use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::pin::Pin;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use reqwest::Method;
 use rmcp::handler::server::tool::IntoCallToolResult;
-use rmcp::model::{CallToolResponse, CallToolResult, ContentBlock};
-use rmcp::ErrorData;
+use rmcp::model::{CallToolResponse, CallToolResult, ContentBlock, ProgressNotificationParam, ProgressToken};
+use rmcp::service::RequestContext;
+use rmcp::{ErrorData, RoleServer};
 use serde_json::{json, Value};
 
 use crate::client::AppFlowyClient;
@@ -195,6 +198,81 @@ pub fn unique_path(path: &Path) -> PathBuf {
     }
 }
 
+/// Sends one `notifications/progress` message. Boxed so the sink can be
+/// shared; production wraps `Peer::notify_progress`, tests a recorder.
+pub type ProgressNotify =
+    Arc<dyn Fn(ProgressNotificationParam) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
+
+/// Best-effort `notifications/progress` reporter for minute-long tools.
+///
+/// A tool handler builds one from the rmcp-extracted
+/// `RequestContext<RoleServer>` and hands `&ToolProgress` down to its work
+/// loop. When the client did not attach a `_meta.progressToken` to the
+/// request the reporter is inert — progress is optional in MCP, and an
+/// inert reporter costs one `Option` check per tick, no allocations. A
+/// failed notification only logs: reporting must never break the tool.
+#[derive(Clone, Default)]
+pub struct ToolProgress {
+    sink: Option<ProgressSink>,
+}
+
+#[derive(Clone)]
+struct ProgressSink {
+    token: ProgressToken,
+    notify: ProgressNotify,
+}
+
+impl ToolProgress {
+    /// Inert reporter: every [`report`](Self::report) is a no-op.
+    pub const fn inactive() -> Self {
+        Self { sink: None }
+    }
+
+    /// Token-gated constructor for tool handlers: notifications go through
+    /// the context's peer iff the request `_meta` carried a `progressToken`.
+    pub fn from_context(context: &RequestContext<RoleServer>) -> Self {
+        let Some(token) = context.meta.get_progress_token() else {
+            return Self::inactive();
+        };
+        let peer = context.peer.clone();
+        Self::with_notify(token, Arc::new(move |param| {
+            let peer = peer.clone();
+            Box::pin(async move {
+                if let Err(e) = peer.notify_progress(param).await {
+                    tracing::warn!(%e, "failed to send notifications/progress");
+                }
+            })
+        }))
+    }
+
+    /// Reporter over an arbitrary notification sink — the seam tests use to
+    /// record notifications; the production path is
+    /// [`from_context`](Self::from_context).
+    pub fn with_notify(token: ProgressToken, notify: ProgressNotify) -> Self {
+        Self {
+            sink: Some(ProgressSink { token, notify }),
+        }
+    }
+
+    /// True when the client asked for progress (a token was attached).
+    pub fn is_active(&self) -> bool {
+        self.sink.is_some()
+    }
+
+    /// Report `done` of `total` pages, with the message
+    /// `"<verb> <done>/<total> pages"` (e.g. `exporting 2/5 pages`).
+    /// Formats only when active, so the inert path stays free.
+    pub async fn report(&self, done: usize, total: usize, verb: &str) {
+        let Some(sink) = &self.sink else {
+            return;
+        };
+        let mut param = ProgressNotificationParam::new(sink.token.clone(), done as f64);
+        param.total = Some(total as f64);
+        param.message = Some(format!("{verb} {done}/{total} pages"));
+        (sink.notify)(param).await;
+    }
+}
+
 /// Minimal port of Python `Path.expanduser()`: expands a leading `~` (bare,
 /// `~/...`, or `~\...`) against `$USERPROFILE` (Windows) or `$HOME`. The
 /// `~user/...` form is left untouched, as are paths without a leading tilde.
@@ -351,5 +429,51 @@ mod tests {
         let _lock = env_lock().lock().unwrap();
         let _guard = EnvGuard::set(home_var(), None);
         assert_eq!(expand_tilde("~/a.md"), PathBuf::from("~/a.md"));
+    }
+
+    #[tokio::test]
+    async fn progress_reports_through_injected_sink() {
+        // A recording sink stands in for `Peer::notify_progress`: the report
+        // must carry the client's token, monotone counters and the message.
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ProgressNotificationParam>();
+        let token = ProgressToken(rmcp::model::NumberOrString::String("tok-7".into()));
+        let progress = ToolProgress::with_notify(token.clone(), Arc::new(move |param| {
+            tx.send(param).expect("sink alive");
+            Box::pin(async {})
+        }));
+        assert!(progress.is_active());
+
+        progress.report(2, 5, "exporting").await;
+        let param = rx.recv().await.expect("one notification");
+        let wire = serde_json::to_value(&param).unwrap();
+        assert_eq!(wire["progressToken"], json!("tok-7"));
+        assert_eq!(wire["progress"], json!(2.0));
+        assert_eq!(wire["total"], json!(5.0));
+        assert_eq!(wire["message"], json!("exporting 2/5 pages"));
+        drop(progress);
+        assert!(
+            rx.try_recv().is_err(),
+            "exactly one notification per report"
+        );
+    }
+
+    #[tokio::test]
+    async fn progress_without_token_stays_inert() {
+        // MCP progress is optional: no `_meta.progressToken` in the request
+        // -> no reporter, and every tick short-circuits.
+        let progress = ToolProgress::inactive();
+        assert!(!progress.is_active());
+        progress.report(1, 3, "importing").await; // must not panic or block
+    }
+
+    #[test]
+    fn progress_gate_reads_the_meta_progress_token() {
+        // The gate from_context applies: active iff `_meta.progressToken`.
+        let meta = rmcp::model::RequestMetaObject::default();
+        assert!(meta.get_progress_token().is_none());
+        let meta = rmcp::model::RequestMetaObject::with_progress_token(ProgressToken(
+            rmcp::model::NumberOrString::Number(3),
+        ));
+        assert!(meta.get_progress_token().is_some());
     }
 }

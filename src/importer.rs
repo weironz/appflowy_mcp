@@ -47,6 +47,7 @@ use uuid::Uuid;
 use crate::client::AppFlowyClient;
 use crate::error::{Error, Result};
 use crate::markdown::{parse_markdown_to_blocks, Block};
+use crate::tools::util::ToolProgress;
 
 const MARKDOWN_SUFFIXES: [&str; 2] = [".md", ".markdown"];
 const INDEX_FILENAMES: [&str; 2] = ["readme.md", "index.md"];
@@ -135,6 +136,17 @@ pub struct MarkdownImporter {
     pub uploaded_assets: Vec<UploadedAsset>,
     pub warnings: Vec<String>,
     pub errors: Vec<ImportError>,
+    /// Active progress reporter plus the import-wide page counter. Attached
+    /// by the `appflowy_import_markdown_directory` tool handler when the
+    /// client sent a `_meta.progressToken`; `None` (the default) disables
+    /// notifications entirely.
+    progress: Option<ImportProgress>,
+}
+
+struct ImportProgress {
+    reporter: ToolProgress,
+    done: usize,
+    total: usize,
 }
 
 impl MarkdownImporter {
@@ -146,7 +158,34 @@ impl MarkdownImporter {
             uploaded_assets: Vec::new(),
             warnings: Vec::new(),
             errors: Vec::new(),
+            progress: None,
         }
+    }
+
+    /// Attach a progress reporter (built from the tool call's
+    /// `RequestContext`). An inert reporter — no progressToken — stays
+    /// `None`, so the import never even counts pages.
+    pub fn set_progress(&mut self, reporter: ToolProgress) {
+        if reporter.is_active() {
+            self.progress = Some(ImportProgress {
+                reporter,
+                done: 0,
+                total: 0,
+            });
+        }
+    }
+
+    /// One Markdown file of the import finished being processed (its page
+    /// created or failed): advance the `importing done/total pages` bar.
+    async fn tick_progress(&mut self) {
+        let Some(progress) = &mut self.progress else {
+            return;
+        };
+        progress.done += 1;
+        progress
+            .reporter
+            .report(progress.done, progress.total, "importing")
+            .await;
     }
 
     pub async fn import_file(
@@ -223,6 +262,15 @@ impl MarkdownImporter {
             return Ok(self.summary(None));
         }
 
+        // Denominator for `importing n/total pages`: every Markdown file in
+        // the tree, counted under the same ignore rules as the import walk.
+        if let Some(progress) = &mut self.progress {
+            let root = path.clone();
+            progress.total = tokio::task::spawn_blocking(move || count_markdown_files(&root))
+                .await
+                .unwrap_or(0);
+        }
+
         let root_page = self
             .import_directory_tree(&path, parent_view_id, upload_assets, &markdown_dirs)
             .await;
@@ -287,6 +335,11 @@ impl MarkdownImporter {
                 )
                 .await?;
             let page_view_id = page.view_id.clone();
+            // The index file is folded into this folder page, so its page
+            // creation is that file's progress tick.
+            if index_file.is_some() {
+                self.tick_progress().await;
+            }
 
             let sibling_files: Vec<PathBuf> = markdown_files
                 .iter()
@@ -363,6 +416,7 @@ impl MarkdownImporter {
                 .unwrap_or_default();
             self.create_markdown_page(path, parent_view_id, &title, upload_assets, "markdown_file")
                 .await;
+            self.tick_progress().await;
             return;
         }
 
@@ -430,6 +484,9 @@ impl MarkdownImporter {
                 }
             }
             completed += 1;
+            // One Markdown file's page-create pipeline finished — successful
+            // or recorded into errors, it counts as done.
+            self.tick_progress().await;
         }
 
         // Merge in scan order so created_pages / uploaded_assets / warnings /
@@ -1002,6 +1059,22 @@ fn markdown_subtree_dirs(root: &Path) -> HashSet<PathBuf> {
     let mut dirs = HashSet::new();
     collect_markdown_dirs(root, &mut dirs);
     dirs
+}
+
+/// Total Markdown files under `root`, honouring the exact ignore rules the
+/// import walk applies ([`scan_dir`]'s suffix and directory filters) —
+/// the denominator of the import progress bar. Every counted file ticks
+/// exactly once during the import: as an index file folded into its folder
+/// page, or as a sibling page.
+fn count_markdown_files(root: &Path) -> usize {
+    let mut total = 0;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let (_, markdown_files, child_dirs) = scan_dir(&dir);
+        total += markdown_files.len();
+        stack.extend(child_dirs);
+    }
+    total
 }
 
 /// Post-order DFS marking every Markdown-bearing ancestor. Returns whether
