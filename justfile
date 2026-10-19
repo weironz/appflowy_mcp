@@ -43,14 +43,14 @@ build:
 # Linux x64 via zigbuild (skip with a warning if not installed)
 build-linux:
     if [ -f "{{zigbuild}}" ]; then \
-      "{{zigbuild}}" --release --target x86_64-unknown-linux-gnu && \
+      "{{cargo_bin}}" zigbuild --release --target x86_64-unknown-linux-gnu && \
       mkdir -p dist && cp target/x86_64-unknown-linux-gnu/release/appflowy dist/appflowy-linux-x64 && \
       ls -la dist/appflowy-linux-x64; \
     else echo "skip: cargo-zigbuild not found (install via `cargo install cargo-zigbuild`)"; fi
 
 # macOS arm64 via zigbuild (best effort; needs a machO-capable zig toolchain)
 build-macos:
-    -if [ -f "{{zigbuild}}" ]; then "{{zigbuild}}" --release --target aarch64-apple-darwin && mkdir -p dist && cp target/aarch64-apple-darwin/release/appflowy dist/appflowy-macos-aarch64; } || echo "skip: macOS cross-build failed (missing SDK/toolchain for aws-lc); work around: build on a mac"
+    -if [ -f "{{zigbuild}}" ]; then "{{cargo_bin}}" zigbuild --release --target aarch64-apple-darwin && mkdir -p dist && cp target/aarch64-apple-darwin/release/appflowy dist/appflowy-macos-aarch64; fi || echo "skip: macOS cross-build failed (missing SDK/toolchain for aws-lc); work around: build on a mac"
 
 build-artifacts: build build-linux build-macos
 
