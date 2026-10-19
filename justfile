@@ -54,6 +54,11 @@ build-macos:
 
 build-artifacts: build build-linux build-macos
 
+# cross builds are tolerated to fail/skip — they must never block a release
+build-artifacts-best-effort:
+    -just build-linux
+    -just build-macos
+
 # -------- release --------
 
 # derive plain X.Y.Z from the tag (must be vX.Y.Z)
@@ -78,7 +83,7 @@ preflight TAG:
     git diff --quiet && git diff --cached --quiet || { echo "working tree not clean"; exit 1; }
 
 # full local release: preflight -> gate -> artifacts -> tag+push -> gh release
-release TAG: (preflight TAG) gate build-artifacts
+release TAG: (preflight TAG) gate build build-artifacts-best-effort
     git tag "{{TAG}}" && \
     git push origin main && \
     git push origin "{{TAG}}" && \
