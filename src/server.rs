@@ -79,5 +79,9 @@ impl ServerHandler for AppServer {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("appflowy", env!("CARGO_PKG_VERSION")))
+            // Server-level usage guidance for the client's model, delivered in
+            // the initialize response (the native MCP counterpart to the
+            // per-tool descriptions).
+            .with_instructions(include_str!("instructions.md"))
     }
 }

@@ -5,6 +5,15 @@ workspace/space/page CRUD, Markdown import & export, PDF export, databases and C
 
 Install the binary first (one-line scripts: [installation.md](installation.md)), then follow the section for your client.
 
+## How the agent learns to use the tools
+
+Two channels, both zero-config: every `tools/list` response carries rich per-tool
+descriptions, and the `initialize` handshake additionally delivers a compact
+usage guide via the MCP `instructions` field (hierarchy rules, write paths,
+snapshot-before-edit, error semantics). The fuller version with paste-ready
+blocks and recipes lives in [agent-guide.md](agent-guide.md) if you ever want
+to embed the same rules in the client's own instruction files.
+
 ## Credentials: read this first (applies to every client)
 
 The MCP server authenticates **only via environment variables** (or a `.env` file in its working directory):

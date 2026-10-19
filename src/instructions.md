@@ -1,0 +1,10 @@
+Tools for AppFlowy Cloud — read this once, then act directly.
+
+RULES THAT SAVE YOU FROM COMMON MISTAKES
+1. Hierarchy is workspace -> space -> page. Never pass a workspace_id as parent_view_id when creating content (a child of the root becomes a Space, not a document). Discover ids with appflowy_list_spaces / appflowy_get_workspace_folder first; use ids, not names.
+2. Writing: `appflowy_save_page` (markdown by default) for new pages; `appflowy_append_page_content` to add to an existing page. For a native "Link to page" reference, use `appflowy_append_page_link` (view_id of the target), not a markdown hyperlink.
+3. Editing existing content: use `appflowy_update_document_block` / `appflowy_delete_document_block`. ALWAYS call `appflowy_snapshot_document` (or pass snapshot_path on those tools) before overwriting or deleting so `appflowy_restore_document_snapshot` can roll back.
+4. Bulk reading: `appflowy_export_page` / `_space` / `_workspace` give markdown preserving inline formatting (yjs-decoded). Space/workspace exports are incremental — unchanged pages are skipped with zero cost, so repeating exports is cheap.
+5. Databases: rows are created with `appflowy_create_row` (pass `document` in the same call to initialize the row's separate page body; that response includes document_id), appended to with `appflowy_append_markdown_to_row`, and edited/deleted/restored with `appflowy_update_row` / `appflowy_delete_row` / `appflowy_restore_row` (cells keyed by field NAME). Never call page append tools with a raw row_id.
+6. Large folders: `appflowy_import_markdown_directory` (assets uploaded in parallel, order preserved) / `appflowy_import_csv` / `appflowy_import_document` / `appflowy_import_notion_zip` are async server-side tasks — poll the matching status tool instead of re-firing.
+7. Errors: input validation failures arrive as tool results with isError: true and an actionable message — fix the input and retry. Anything else keeps its AppFlowy HTTP status/code in the message. A transient `code 1079` (permission-resolver busy) clears on its own after a short wait.

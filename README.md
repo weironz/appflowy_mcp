@@ -51,6 +51,7 @@ appflowy search "quarterly report"
 | [docs/mcp-connect.md](docs/mcp-connect.md) | Client setup & troubleshooting (Codex, Claude, Cursor, HTTP) |
 | [docs/cli.md](docs/cli.md) | CLI reference: auth chain, addressing, every command, cron/CI |
 | [docs/tools.md](docs/tools.md) | The full 128-tool catalog |
+| [docs/agent-guide.md](docs/agent-guide.md) | How an AI client should use the tools (paste-ready block + recipes) |
 | [docs/development.md](docs/development.md) | Module map, design notes, adding a tool, release process |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | What's shipped and what's deliberately deferred |
 | [docs/README.md](docs/README.md) | Docs index |
