@@ -59,5 +59,13 @@ async fn appflowy_example(
 
 ### Releasing
 
-Bump `version` in `Cargo.toml`, commit, push `main`, then push a tag `vX.Y.Z`. `.github/workflows/release.yml` checks tag == crate version, runs tests + clippy, builds Windows/Linux/macOS (x64 & arm64) binaries, and attaches them to a new GitHub Release. There is no PyPI step anymore.
+**Local flow (primary while GitHub Actions quota is exhausted), via the repo-root [`justfile`](../justfile):**
+
+```bash
+just ship v0.9.2     # bump Cargo.toml -> test+clippy gates -> build artifacts -> tag+push -> gh release
+```
+
+Gates are identical to CI (`cargo test`, `clippy -D warnings`). Artifacts staged in `dist/`: Windows host always, plus Linux x64 via `cargo-zigbuild` when installed (macOS is best-effort via zigbuild and tells you how to recover when it can't cross-build). `just --list` shows the parts — `just test`, `just gate`, `just build`, `just preflight vX.Y.Z`, `just release vX.Y.Z` — for driving steps by hand; `just bump` and `just preflight` enforce the tag==Cargo.toml version and a clean tree before anything goes out.
+
+**CI flow (backup, manual dispatch when quota returns):** `.github/workflows/release.yml` does the same gates and a 3-platform matrix (Windows/Linux/macOS arm64) on `workflow_dispatch`. Intel Mac is intentionally out of the matrix (GitHub's retired runner pool starves the queue). There is no PyPI step anymore.
 

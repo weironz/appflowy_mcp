@@ -12,9 +12,10 @@ name: Release
 # installable as-is).
 
 on:
-  push:
-    tags:
-      - "v*"
+  # GitHub Actions quota is exhausted — releases are produced locally via
+  # `just release vX.Y.Z` (same gates + artifacts). Keep this workflow for
+  # manual dispatch when quota returns.
+  workflow_dispatch:
 
 permissions:
   contents: write # create the GitHub Release
