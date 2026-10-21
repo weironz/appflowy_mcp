@@ -820,8 +820,27 @@ pub fn parse_markdown_to_blocks(
                 Some(resolve) => resolve(url, alt),
                 None => url.to_string(),
             };
-            list_stack.clear();
-            blocks.push(image_block(image_url, alt.to_string()));
+            // An indented full-line image belongs to the enclosing list item:
+            // the exporter renders an image child of a list item on its own
+            // line indented under it (`- item` then `  ![alt](url)`). Attach
+            // it under the deepest open item whose indent level is lower —
+            // nesting must survive an export->import round trip. The stack is
+            // popped at that boundary but the image itself is not pushed
+            // (images never parent list items), so following items continue
+            // to nest under their real list parent. An unindented image pops
+            // the whole stack, identical to clearing it.
+            let level = list_indent_level(line);
+            while matches!(list_stack.last(), Some(&(top, _)) if top >= level) {
+                list_stack.pop();
+            }
+            let block = image_block(image_url, alt.to_string());
+            match list_stack.last() {
+                Some((_, parent_path)) => {
+                    let parent = block_at_path_mut(&mut blocks, parent_path);
+                    parent.children.push(block);
+                }
+                None => blocks.push(block),
+            }
             i += 1;
             continue;
         }

@@ -6,9 +6,10 @@
 //! when importing large directories. Here every page is processed in two
 //! phases:
 //!
-//! 1. The raw markdown is scanned for image references (mirroring the exact
-//!    line-gating of `parse_markdown_to_blocks`, so the scan sees precisely
-//!    the URLs the resolver would be asked about). Local files are resolved,
+//! 1. The raw markdown is run through `parse_markdown_to_blocks` once with a
+//!    recording image resolver, so the scan sees precisely the URLs the real
+//!    resolver will be asked about — by construction, not by a hand-maintained
+//!    mirror of the parser's line gating. Local files are resolved,
 //!    deduplicated by resolved absolute path, then uploaded concurrently via
 //!    a `JoinSet` + `Semaphore` (at most [`MAX_CONCURRENT_UPLOADS`] in
 //!    flight) into this page's `view_id` as `parent_dir`.
@@ -34,9 +35,8 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
-use regex::Regex;
 use reqwest::Method;
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -1157,157 +1157,27 @@ fn plan_order_correction(actual: &[String], desired: &[String]) -> Vec<SiblingMo
 // Image-reference pre-scan
 // ---------------------------------------------------------------------------
 
-fn full_line_image_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(r"^!\[(?P<alt>[^\]]*)\]\((?P<url>[^)]+)\)$").expect("image pattern compiles")
-    })
-}
-
-fn inline_image_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(r"!\[(?P<alt>[^\]]*)\]\((?P<url>[^)]+)\)")
-            .expect("inline image pattern compiles")
-    })
-}
-
-fn heading_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"^#{1,6}\s+.+$").expect("heading pattern compiles"))
-}
-
-fn ordered_list_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"^\d+\.\s+.+$").expect("ordered list pattern compiles"))
-}
-
-fn math_one_liner_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"^\$\$.+?\$\$$").expect("math block pattern compiles"))
-}
-
-fn table_separator_cell_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"^:?-+:?$").expect("table separator cell pattern compiles"))
-}
-
-/// Scan `content` for the exact set of `(url, caption)` references that
-/// `parse_markdown_to_blocks` would pass to its image resolver: full-line
-/// images plus inline images on fallback (plain paragraph) lines only.
+/// Collect the exact set of `(url, caption)` references that
+/// `parse_markdown_to_blocks` will pass to its image resolver.
 ///
-/// This deliberately mirrors the parser's line-gating control flow — front
-/// matter, fenced code blocks, dividers, tables, math, headings, todos,
-/// lists and quotes never reach the resolver there, and so must not be
-/// scanned here either — so the upload set matches byte-for-byte what the
-/// Python serial resolver would have uploaded.
+/// The scan simply runs the parser once with a recording resolver: it notes
+/// every `(url, caption)` pair and returns the url unchanged. The collected
+/// set is therefore identical to what the real resolver will be asked about,
+/// by construction — a previous hand-written mirror of the parser's line
+/// gating drifted and silently skipped images inside headings, todos, lists
+/// and quotes, so those were never uploaded (BUGS.md #1). Cost: one extra
+/// pure-CPU parse pass per page.
 fn scan_image_references(content: &str) -> Vec<(String, String)> {
-    let mut lines: Vec<&str> = content.lines().collect();
-    strip_front_matter_lines(&mut lines);
-
     let mut refs = Vec::new();
-    let total = lines.len();
-    let mut i = 0usize;
-    let mut in_code_block = false;
-
-    while i < total {
-        let line = lines[i];
-        let stripped = line.trim();
-
-        if stripped.starts_with("```") {
-            in_code_block = !in_code_block;
-            i += 1;
-            continue;
-        }
-        if in_code_block || stripped.is_empty() {
-            i += 1;
-            continue;
-        }
-        if stripped == "---" || stripped == "***" {
-            i += 1;
-            continue;
-        }
-        if stripped.starts_with('|') && i + 1 < total && is_table_separator_line(lines[i + 1]) {
-            let mut j = i + 2;
-            while j < total && lines[j].trim().starts_with('|') {
-                j += 1;
-            }
-            i = j;
-            continue;
-        }
-        if stripped == "$$" {
-            let mut j = i + 1;
-            while j < total && lines[j].trim() != "$$" {
-                j += 1;
-            }
-            i = if j < total { j + 1 } else { j };
-            continue;
-        }
-        if math_one_liner_re().is_match(stripped) {
-            i += 1;
-            continue;
-        }
-        if let Some(caps) = full_line_image_re().captures(stripped) {
-            refs.push((caps["url"].to_string(), caps["alt"].to_string()));
-            i += 1;
-            continue;
-        }
-        if heading_re().is_match(stripped)
-            || stripped.starts_with("- [ ] ")
-            || stripped.starts_with("- [x] ")
-            || stripped.starts_with("- ")
-            || stripped.starts_with("* ")
-            || ordered_list_re().is_match(stripped)
-            || stripped.starts_with("> ")
-        {
-            i += 1;
-            continue;
-        }
-        for caps in inline_image_re().captures_iter(line) {
-            refs.push((caps["url"].to_string(), caps["alt"].to_string()));
-        }
-        i += 1;
-    }
+    let mut resolver = |url: &str, caption: &str| -> String {
+        refs.push((url.to_string(), caption.to_string()));
+        url.to_string()
+    };
+    // The blocks built here are discarded; only the recorded references are
+    // kept (the real parse in `parse_markdown_with_uploads` builds them again
+    // with the lookup resolver).
+    let _ = parse_markdown_to_blocks(content, Some(&mut resolver));
     refs
-}
-
-/// Local copy of markdown.rs's private `strip_front_matter`, kept in sync so
-/// the pre-scan and the parser skip the same lines.
-fn strip_front_matter_lines(lines: &mut Vec<&str>) {
-    if lines.first().map(|l| l.trim()) != Some("---") {
-        return;
-    }
-    for idx in 1..lines.len() {
-        if lines[idx].trim() == "---" {
-            lines.drain(..=idx);
-            return;
-        }
-    }
-}
-
-/// Simplified `is_table_separator`: unlike markdown.rs it splits cells on
-/// plain `|` without unescaping `\|`. An escaped pipe inside a separator row
-/// is virtually nonexistent; the worst case is the scan treating a table
-/// header as a fallback line (an extra upload), never a missed replacement.
-fn is_table_separator_line(line: &str) -> bool {
-    let stripped = line.trim();
-    if !stripped.contains('|') {
-        return false;
-    }
-    let mut row = stripped;
-    if let Some(rest) = row.strip_prefix('|') {
-        row = rest;
-    }
-    if let Some(rest) = row.strip_suffix('|') {
-        row = rest;
-    }
-    let cells: Vec<&str> = row.split('|').collect();
-    if cells.is_empty() {
-        return false;
-    }
-    cells
-        .iter()
-        .all(|cell| table_separator_cell_re().is_match(cell.trim()))
 }
 
 // ---------------------------------------------------------------------------
@@ -1496,15 +1366,30 @@ mod tests {
     }
 
     #[test]
-    fn scan_skips_regions_the_parser_never_resolves() {
+    fn scan_covers_images_in_every_container_line_type() {
+        // Headings, todos, lists and quotes pass their inline images through
+        // the resolver (via `parse_rich_blocks`), so the scan must collect
+        // them too — these used to be gated out and never uploaded.
         let content = concat!(
-            "---\nmeta: ![fm](fm.png)\n---\n",
-            "```\n![code](code.png)\n```\n",
             "# Heading ![head](head.png)\n",
             "- bullet ![list](list.png)\n",
             "- [ ] todo ![todo](todo.png)\n",
             "1. ordered ![ord](ord.png)\n",
             "> quote ![q](q.png)\n",
+        );
+        let mut got = urls(content);
+        got.sort();
+        assert_eq!(
+            got,
+            vec!["head.png", "list.png", "ord.png", "q.png", "todo.png"]
+        );
+    }
+
+    #[test]
+    fn scan_skips_regions_the_parser_never_resolves() {
+        let content = concat!(
+            "---\nmeta: ![fm](fm.png)\n---\n",
+            "```\n![code](code.png)\n```\n",
             "$$ ![math-inline](mi.png) $$\n",
             "$$\n![math](m.png)\n$$\n",
             "| ![tbl](t.png) |\n| --- |\n| ![tbl2](t2.png) |\n",
@@ -1717,5 +1602,86 @@ mod tests {
         let actual = str_ids(&["b"]);
         assert!(plan_order_correction(&actual, &desired).is_empty());
         assert!(plan_order_correction(&[], &desired).is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // Regression tests for the image pre-scan bugs (see BUGS.md #1-2): the
+    // scan must cover exactly the URLs the parser hands its resolver.
+    // ------------------------------------------------------------------
+
+    /// URLs the parser asks the image resolver about, in resolution order.
+    fn resolved_urls(content: &str) -> Vec<String> {
+        let mut resolved = Vec::new();
+        let mut resolve = |url: &str, _caption: &str| {
+            resolved.push(url.to_string());
+            url.to_string()
+        };
+        parse_markdown_to_blocks(content, Some(&mut resolve));
+        resolved
+    }
+
+    fn scanned_urls(content: &str) -> Vec<String> {
+        scan_image_references(content)
+            .into_iter()
+            .map(|(url, _)| url)
+            .collect()
+    }
+
+    /// The upload pre-scan must collect exactly the URLs the parser will
+    /// hand its resolver. It used to gate out heading / todo / bulleted /
+    /// numbered / quote lines while `parse_markdown_to_blocks` resolves
+    /// images on exactly those lines
+    /// (tests/markdown.rs::test_inline_images_inside_list_and_heading proves
+    /// the resolver IS called there, rewriting the URL), so with
+    /// `upload_assets: true`, those images were never uploaded and the
+    /// imported page kept the raw local relative path as a broken image
+    /// URL — silently (the file just never appeared in `uploaded_assets`).
+    #[test]
+    fn scan_covers_every_url_the_parser_resolves() {
+        let content = concat!(
+            "# Heading ![head](h.png)\n",
+            "- bullet ![list](b.png)\n",
+            "- [ ] todo ![todo](t.png)\n",
+            "1. ordered ![ord](o.png)\n",
+            "> quote ![q](q.png)\n",
+            "plain paragraph ![para](p.png)\n",
+        );
+
+        let mut resolved = resolved_urls(content);
+        resolved.sort();
+        assert_eq!(
+            resolved,
+            ["b.png", "h.png", "o.png", "p.png", "q.png", "t.png"],
+            "parser-side expectations changed; update this repro"
+        );
+
+        let mut scanned = scanned_urls(content);
+        scanned.sort();
+        assert_eq!(
+            scanned, resolved,
+            "pre-scan and parser disagree: these images are never uploaded"
+        );
+    }
+
+    /// The importer's old local `strip_front_matter_lines` copy drained to
+    /// the next `---` unconditionally, while markdown.rs's
+    /// `strip_front_matter` only strips a band whose lines look like YAML. A
+    /// document leading with a divider + plain text keeps that band in the
+    /// parser (so its images are resolved) and the scan must agree — now
+    /// guaranteed by construction, since the scan runs the very same parser.
+    #[test]
+    fn scan_matches_parser_front_matter_gating() {
+        let content = "---\nplain text ![x](x.png)\n---\n![kept](y.png)\n";
+
+        let mut resolved = resolved_urls(content);
+        resolved.sort();
+        assert_eq!(resolved, ["x.png", "y.png"]);
+
+        let mut scanned = scanned_urls(content);
+        scanned.sort();
+        assert_eq!(
+            scanned, resolved,
+            "pre-scan and parser disagree on non-YAML front matter"
+        );
     }
 }
