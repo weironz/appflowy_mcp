@@ -13,7 +13,7 @@
 //! the exact Content-Type the URL was signed for.
 
 use std::io::ErrorKind;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use reqwest::Method;
 use rmcp::handler::server::wrapper::Parameters;
@@ -24,8 +24,17 @@ use serde_json::{json, Value};
 use crate::error::{Error, Result as AppResult};
 use crate::server::AppServer;
 use crate::tools::util::{
-    ensure_parent_is_not_workspace, map_tool_error, presigned_upload_client, ToolError,
+    ensure_parent_is_not_workspace, expand_tilde, map_tool_error, presigned_upload_client,
+    ToolError,
 };
+
+/// Resolve a user-supplied local import path. Every import entry point funnels
+/// through here so a leading `~` expands to the home directory instead of
+/// being looked up relative to the process working directory (the same
+/// behavior as upload, meeting and CLI paths).
+fn local_import_path(raw: &str) -> PathBuf {
+    expand_tilde(raw)
+}
 
 /// Content type the server signs each document-import presigned URL for;
 /// the PUT must carry the same value or S3 rejects the signature.
@@ -222,7 +231,8 @@ async fn create_and_upload(
 pub struct ImportCsvRequest {
     /// Workspace importing the CSV.
     pub workspace_id: String,
-    /// Local path of the .csv file to import.
+    /// Local path of the .csv file to import. A leading `~` expands to the
+    /// home directory.
     pub path: String,
     /// Import mode: "create" (default, new database), "append" or "replace"
     /// (both require database_id).
@@ -269,7 +279,7 @@ pub struct ImportDocumentRequest {
     /// Workspace importing the document.
     pub workspace_id: String,
     /// Local path of the file to import. Supported extensions: .doc, .html,
-    /// .docx, .pdf.
+    /// .docx, .pdf. A leading `~` expands to the home directory.
     pub path: String,
     /// Parent page (view_id) the imported document page is created under.
     pub parent_view_id: String,
@@ -299,7 +309,8 @@ pub struct ImportNotionZipRequest {
     /// Parent page (view_id) the imported Notion pages are created under;
     /// sent as the `page_id` query parameter.
     pub parent_view_id: String,
-    /// Local path of the .zip file exported from Notion.
+    /// Local path of the .zip file exported from Notion. A leading `~`
+    /// expands to the home directory.
     pub path: String,
     /// If true, wait for the server-side import to finish. Not implemented:
     /// the call always returns once the zip is staged; poll
@@ -338,7 +349,7 @@ impl AppServer {
     ) -> Result<Json<Value>, ToolError> {
         require_non_empty(&request.workspace_id, "workspace_id").map_err(map_tool_error)?;
         require_non_empty(&request.path, "path").map_err(map_tool_error)?;
-        let path = Path::new(&request.path);
+        let path = local_import_path(&request.path);
         let extension = path
             .extension()
             .map(|ext| ext.to_string_lossy().to_lowercase())
@@ -386,7 +397,7 @@ impl AppServer {
             ensure_parent_is_not_workspace(&request.workspace_id, parent_view_id)
                 .map_err(map_tool_error)?;
         }
-        let bytes = read_import_file(path).await.map_err(map_tool_error)?;
+        let bytes = read_import_file(&path).await.map_err(map_tool_error)?;
         let name = request
             .name
             .filter(|name| !name.is_empty())
@@ -495,7 +506,7 @@ impl AppServer {
         require_non_empty(&request.workspace_id, "workspace_id").map_err(map_tool_error)?;
         require_non_empty(&request.parent_view_id, "parent_view_id").map_err(map_tool_error)?;
         require_non_empty(&request.path, "path").map_err(map_tool_error)?;
-        let path = Path::new(&request.path);
+        let path = local_import_path(&request.path);
         let format = path
             .extension()
             .map(|ext| ext.to_string_lossy().to_lowercase())
@@ -505,7 +516,7 @@ impl AppServer {
                     "Unsupported document format: \"{format}\". Supported formats: doc, html, docx, pdf"
                 )));
         }
-        let bytes = read_import_file(path).await.map_err(map_tool_error)?;
+        let bytes = read_import_file(&path).await.map_err(map_tool_error)?;
         let file_name = path
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
@@ -573,7 +584,7 @@ impl AppServer {
         require_non_empty(&request.workspace_id, "workspace_id").map_err(map_tool_error)?;
         require_non_empty(&request.parent_view_id, "parent_view_id").map_err(map_tool_error)?;
         require_non_empty(&request.path, "path").map_err(map_tool_error)?;
-        let path = Path::new(&request.path);
+        let path = local_import_path(&request.path);
         let extension = path
             .extension()
             .map(|ext| ext.to_string_lossy().to_lowercase())
@@ -584,7 +595,7 @@ impl AppServer {
                 request.path
             )));
         }
-        let bytes = read_import_file(path).await.map_err(map_tool_error)?;
+        let bytes = read_import_file(&path).await.map_err(map_tool_error)?;
         let base_url = self.client.base_url().await;
         let headers: Vec<(&str, &str)> = vec![("X-Host", &base_url)];
         let params = [("page_id", request.parent_view_id.clone())];
@@ -701,5 +712,40 @@ impl AppServer {
             .await
             .map(Json)
             .map_err(map_tool_error)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::local_import_path;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn import_paths_without_tilde_pass_through() {
+        assert_eq!(
+            local_import_path("data/export.csv"),
+            PathBuf::from("data/export.csv")
+        );
+        assert_eq!(
+            local_import_path("~user/data/export.csv"),
+            PathBuf::from("~user/data/export.csv")
+        );
+    }
+
+    #[test]
+    fn import_paths_with_tilde_resolve_under_home() {
+        // `util::expand_tilde` falls back to the literal path when no home
+        // directory is available; accept that fallback so the test stays
+        // platform-friendly and independent of environment-variable races
+        // with the util tests.
+        let raw = "~/data/export.zip";
+        let resolved = local_import_path(raw);
+        if resolved == PathBuf::from(raw) {
+            return;
+        }
+        assert!(
+            resolved.ends_with(Path::new("data/export.zip")),
+            "unexpected expansion: {resolved:?}"
+        );
     }
 }

@@ -9,7 +9,7 @@
 //! rebuilds it as fresh blocks over a detached current document (tombstoned
 //! content cannot be revived by a raw whole-state push-back).
 
-use std::path::Path;
+use std::path::PathBuf;
 
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{tool, tool_router, Json};
@@ -21,7 +21,7 @@ use crate::collab_doc;
 use crate::collab_edit;
 use crate::error::Error;
 use crate::server::AppServer;
-use crate::tools::util::{map_tool_error, ToolError};
+use crate::tools::util::{expand_tilde, map_tool_error, ToolError};
 
 #[derive(Debug, Default, Deserialize, rmcp::schemars::JsonSchema)]
 #[serde(default)]
@@ -37,6 +37,7 @@ pub struct UpdateDocumentBlockRequest {
     /// Optional local path: before editing, save the full pre-edit document
     /// state (base64 doc_state + timestamp) there; restore with
     /// appflowy_restore_document_snapshot. Parent directories are created.
+    /// A leading `~` expands to the home directory.
     pub snapshot_path: Option<String>,
 }
 
@@ -51,6 +52,7 @@ pub struct DeleteDocumentBlockRequest {
     /// Optional local path: before deleting, save the full pre-edit document
     /// state (base64 doc_state + timestamp) there; restore with
     /// appflowy_restore_document_snapshot. Parent directories are created.
+    /// A leading `~` expands to the home directory.
     pub snapshot_path: Option<String>,
 }
 
@@ -60,7 +62,8 @@ pub struct SnapshotDocumentRequest {
     pub workspace_id: String,
     /// The page whose document collab is snapshotted.
     pub page_id: String,
-    /// Local path for the snapshot file; parent directories are created.
+    /// Local path for the snapshot file; parent directories are created. A
+    /// leading `~` expands to the home directory.
     pub snapshot_path: String,
 }
 
@@ -71,7 +74,16 @@ pub struct RestoreDocumentSnapshotRequest {
     /// Must equal the page_id stored inside the snapshot file.
     pub page_id: String,
     /// Snapshot file written by snapshot_path / appflowy_snapshot_document.
+    /// A leading `~` expands to the home directory.
     pub snapshot_path: String,
+}
+
+/// Resolve a user-supplied snapshot path. Every snapshot entry point funnels
+/// through here so a leading `~` expands to the home directory instead of
+/// being looked up relative to the process working directory (the same
+/// behavior as upload, import and CLI paths).
+fn snapshot_file_path(raw: &str) -> PathBuf {
+    expand_tilde(raw)
 }
 
 #[tool_router(router = docedit_tool_router, vis = "pub(crate)")]
@@ -94,10 +106,11 @@ impl AppServer {
                 "snapshot_path must not be empty when given.",
             ));
         }
-        let (envelope, _) = collab_doc::write_snapshot(doc, workspace_id, page_id, Path::new(path))
+        let path = snapshot_file_path(path);
+        let (envelope, _) = collab_doc::write_snapshot(doc, workspace_id, page_id, &path)
             .map_err(map_tool_error)?;
         Ok(json!({
-            "snapshot_path": path,
+            "snapshot_path": path.display().to_string(),
             "snapshot_created_at": envelope["created_at"],
             "snapshot_doc_state_bytes": envelope["doc_state_bytes"],
         }))
@@ -233,16 +246,13 @@ impl AppServer {
         let doc = self
             .fetch_document(&request.workspace_id, &request.page_id)
             .await?;
-        let (envelope, _) = collab_doc::write_snapshot(
-            &doc,
-            &request.workspace_id,
-            &request.page_id,
-            Path::new(&request.snapshot_path),
-        )
-        .map_err(map_tool_error)?;
+        let path = snapshot_file_path(&request.snapshot_path);
+        let (envelope, _) =
+            collab_doc::write_snapshot(&doc, &request.workspace_id, &request.page_id, &path)
+                .map_err(map_tool_error)?;
         Ok(Json(json!({
             "page_id": request.page_id,
-            "snapshot_path": request.snapshot_path,
+            "snapshot_path": path.display().to_string(),
             "snapshot_created_at": envelope["created_at"],
             "snapshot_doc_state_bytes": envelope["doc_state_bytes"],
         })))
@@ -270,7 +280,8 @@ impl AppServer {
         if request.page_id.is_empty() {
             return Err(ToolError::validation("page_id must not be empty."));
         }
-        let raw = tokio::fs::read(&request.snapshot_path)
+        let path = snapshot_file_path(&request.snapshot_path);
+        let raw = tokio::fs::read(&path)
             .await
             .map_err(Error::Io)
             .map_err(map_tool_error)?;
@@ -310,7 +321,7 @@ impl AppServer {
 
         Ok(Json(json!({
             "page_id": request.page_id,
-            "restored_from": request.snapshot_path,
+            "restored_from": path.display().to_string(),
             "snapshot_created_at": snapshot.created_at,
             "rebuilt_blocks": outcome.rebuilt_blocks,
             "removed_existing": outcome.removed_existing,
@@ -318,5 +329,40 @@ impl AppServer {
             "update_bytes": update_bytes,
             "restored": true,
         })))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::snapshot_file_path;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn snapshot_paths_without_tilde_pass_through() {
+        assert_eq!(
+            snapshot_file_path("backups/page.snapshot.json"),
+            PathBuf::from("backups/page.snapshot.json")
+        );
+        assert_eq!(
+            snapshot_file_path("~user/page.snapshot.json"),
+            PathBuf::from("~user/page.snapshot.json")
+        );
+    }
+
+    #[test]
+    fn snapshot_paths_with_tilde_resolve_under_home() {
+        // `util::expand_tilde` falls back to the literal path when no home
+        // directory is available; accept that fallback so the test stays
+        // platform-friendly and independent of environment-variable races
+        // with the util tests.
+        let raw = "~/backups/page.snapshot.json";
+        let resolved = snapshot_file_path(raw);
+        if resolved == PathBuf::from(raw) {
+            return;
+        }
+        assert!(
+            resolved.ends_with(Path::new("backups/page.snapshot.json")),
+            "unexpected expansion: {resolved:?}"
+        );
     }
 }

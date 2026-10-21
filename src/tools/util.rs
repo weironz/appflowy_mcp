@@ -421,6 +421,10 @@ mod tests {
         let _guard = EnvGuard::set(home_var(), Some("/fake/home"));
         assert_eq!(expand_tilde("~"), PathBuf::from("/fake/home"));
         assert_eq!(expand_tilde("~/a.md"), PathBuf::from("/fake/home/a.md"));
+        assert_eq!(
+            expand_tilde("~/data/export.zip"),
+            PathBuf::from("/fake/home/data/export.zip")
+        );
         assert_eq!(expand_tilde("~\\a.md"), PathBuf::from("/fake/home/a.md"));
     }
 
