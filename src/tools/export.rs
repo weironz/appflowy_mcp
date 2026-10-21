@@ -1474,9 +1474,9 @@ impl AppServer {
             // An envelope without task_id is not a task handle; returning the
             // whole response as the "id" would mislead callers into polling
             // with an object.
-            ToolError::internal(
-                "workspace zip export response did not include task_id; full response: {data}",
-            )
+            ToolError::internal(format!(
+                "workspace zip export response did not include task_id; full response: {data}"
+            ))
         })?;
         Ok(Json(json!({
             "task_id": task_id,

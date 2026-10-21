@@ -14,6 +14,7 @@ use yrs::{
 
 use appflowy_mcp::collab::{decode_document, BlockEntry, Document};
 use appflowy_mcp::delta::DeltaOp;
+use appflowy_mcp::markdown::parse_markdown_to_blocks;
 use appflowy_mcp::render::{delta_to_markdown, document_to_markdown, sanitize_filename};
 
 // ---------------------------------------------------------------------------
@@ -225,6 +226,107 @@ fn test_document_to_markdown_block_types() {
     // not look like YAML front matter on re-import.
     assert!(md.contains("***"));
     assert!(md.contains("![cap](https://x/i.png)"));
+}
+
+#[test]
+fn test_list_images_survive_export_import_round_trip() {
+    // The exporter renders an image child of a list item on its own indented
+    // line; on re-import it must stay nested under that item instead of
+    // landing at the document top level after the list (BUGS.md #5).
+    let doc = make_document(vec![
+        spec(
+            "bulleted_list",
+            json!({}),
+            Some(vec![DeltaOp::plain("bullet")]),
+            vec![spec(
+                "image",
+                json!({"url": "https://x.example/b.png", "caption": "b"}),
+                None,
+                vec![],
+            )],
+        ),
+        spec(
+            "numbered_list",
+            json!({}),
+            Some(vec![DeltaOp::plain("one")]),
+            vec![spec(
+                "image",
+                json!({"url": "https://x.example/n.png", "caption": "n"}),
+                None,
+                vec![],
+            )],
+        ),
+        spec(
+            "todo_list",
+            json!({"checked": true}),
+            Some(vec![DeltaOp::plain("done")]),
+            vec![spec(
+                "image",
+                json!({"url": "https://x.example/t.png", "caption": "t"}),
+                None,
+                vec![],
+            )],
+        ),
+        spec(
+            "bulleted_list",
+            json!({}),
+            Some(vec![DeltaOp::plain("outer")]),
+            vec![spec(
+                "bulleted_list",
+                json!({}),
+                Some(vec![DeltaOp::plain("inner")]),
+                vec![spec(
+                    "image",
+                    json!({"url": "https://x.example/i.png", "caption": "i"}),
+                    None,
+                    vec![],
+                )],
+            )],
+        ),
+    ]);
+    let md = document_to_markdown(&doc, None);
+    let blocks = parse_markdown_to_blocks(&md, None);
+    assert_eq!(
+        serde_json::to_value(&blocks).unwrap(),
+        json!([
+            {
+                "type": "bulleted_list",
+                "data": {"delta": [{"insert": "bullet"}]},
+                "children": [{
+                    "type": "image",
+                    "data": {"url": "https://x.example/b.png", "caption": "b"},
+                }],
+            },
+            {
+                "type": "numbered_list",
+                "data": {"delta": [{"insert": "one"}]},
+                "children": [{
+                    "type": "image",
+                    "data": {"url": "https://x.example/n.png", "caption": "n"},
+                }],
+            },
+            {
+                "type": "todo_list",
+                "data": {"checked": true, "delta": [{"insert": "done"}]},
+                "children": [{
+                    "type": "image",
+                    "data": {"url": "https://x.example/t.png", "caption": "t"},
+                }],
+            },
+            {
+                "type": "bulleted_list",
+                "data": {"delta": [{"insert": "outer"}]},
+                "children": [{
+                    "type": "bulleted_list",
+                    "data": {"delta": [{"insert": "inner"}]},
+                    "children": [{
+                        "type": "image",
+                        "data": {"url": "https://x.example/i.png", "caption": "i"},
+                    }],
+                }],
+            },
+        ])
+    );
 }
 
 #[test]

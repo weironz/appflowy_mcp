@@ -173,6 +173,44 @@ async fn http_api_error_stays_protocol_error() {
 }
 
 #[tokio::test]
+async fn http_workspace_zip_export_without_task_id_reports_response() {
+    // When the backend answers without `task_id`, the error message must
+    // interpolate the actual response body — a literal "{data}" tells the
+    // caller nothing. Regression for the missing `format!`.
+    let backend = MockServer::start_async().await;
+    let mock = backend
+        .mock_async(|when, then| {
+            when.method(POST).path("/api/export/workspace/ws");
+            then.status(200)
+                .json_body(json!({"detail": "unexpected envelope"}));
+        })
+        .await;
+    let server = AppServer {
+        client: AppFlowyClient::new(None, None, backend.base_url()),
+    };
+    let url = spawn_server_with(server).await;
+    let client = reqwest::Client::new();
+    let session = open_session(&client, &url).await;
+
+    let call = post(&client, &url)
+        .header("mcp-session-id", &session)
+        .body(
+            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"appflowy_export_workspace_zip","arguments":{"workspace_id":"ws"}}}"#,
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(call.status(), 200);
+    let body = rpc_json(&call.text().await.unwrap());
+    let message = body["error"]["message"]
+        .as_str()
+        .unwrap_or_else(|| panic!("expected a protocol error, got: {body}"));
+    assert!(message.contains("unexpected envelope"), "message: {message}");
+    assert!(!message.contains("{data}"), "message: {message}");
+    mock.assert_calls_async(1).await;
+}
+
+#[tokio::test]
 async fn http_rejects_foreign_host_header() {
     let url = spawn_server().await;
     let resp = post(&reqwest::Client::new(), &url)

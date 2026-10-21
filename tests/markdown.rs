@@ -646,6 +646,92 @@ fn test_inline_images_inside_list_and_heading() {
 }
 
 #[test]
+fn test_indented_full_line_image_nests_under_list_item() {
+    // The exporter renders an image child of a list item on its own indented
+    // line (`- item` then `  ![alt](url)`); on import the image must stay
+    // nested under that item instead of landing at the document top level
+    // (BUGS.md #5).
+    let blocks = parse_markdown_to_blocks("- item\n  ![alt](https://x.example/i.png)\n", None);
+    assert_eq!(
+        to_json(blocks),
+        json!([{
+            "type": "bulleted_list",
+            "data": {"delta": [{"insert": "item"}]},
+            "children": [{
+                "type": "image",
+                "data": {"url": "https://x.example/i.png", "caption": "alt"},
+            }],
+        }])
+    );
+}
+
+#[test]
+fn test_indented_image_nests_under_numbered_and_todo_items() {
+    let blocks =
+        parse_markdown_to_blocks("1. one\n  ![n](n.png)\n- [x] done\n  ![t](t.png)\n", None);
+    assert_eq!(
+        to_json(blocks),
+        json!([
+            {
+                "type": "numbered_list",
+                "data": {"delta": [{"insert": "one"}]},
+                "children": [{
+                    "type": "image",
+                    "data": {"url": "n.png", "caption": "n"},
+                }],
+            },
+            {
+                "type": "todo_list",
+                "data": {"checked": true, "delta": [{"insert": "done"}]},
+                "children": [{
+                    "type": "image",
+                    "data": {"url": "t.png", "caption": "t"},
+                }],
+            },
+        ])
+    );
+}
+
+#[test]
+fn test_list_items_after_a_nested_image_keep_nesting() {
+    // The image must not push itself onto the list stack (images never
+    // parent list items): items on either side of it still nest under their
+    // real list parent.
+    let blocks =
+        parse_markdown_to_blocks("- outer\n  - inner\n  ![alt](i.png)\n  - inner2\n", None);
+    assert_eq!(
+        to_json(blocks),
+        json!([{
+            "type": "bulleted_list",
+            "data": {"delta": [{"insert": "outer"}]},
+            "children": [
+                {
+                    "type": "bulleted_list",
+                    "data": {"delta": [{"insert": "inner"}]},
+                },
+                {
+                    "type": "image",
+                    "data": {"url": "i.png", "caption": "alt"},
+                },
+                {
+                    "type": "bulleted_list",
+                    "data": {"delta": [{"insert": "inner2"}]},
+                },
+            ],
+        }])
+    );
+}
+
+#[test]
+fn test_unindented_image_closes_the_list() {
+    // A full-line image at indent 0 is a document-level block, same as
+    // before: the list ends here and the image does not nest.
+    let blocks = parse_markdown_to_blocks("- item\n![alt](i.png)\n- next\n", None);
+    let types: Vec<&str> = blocks.iter().map(|b| b.ty.as_str()).collect();
+    assert_eq!(types, ["bulleted_list", "image", "bulleted_list"]);
+}
+
+#[test]
 fn test_inline_image_syntax_in_code_span_is_verbatim() {
     // `` `![a](b)` `` inside a paragraph is code, not an image: the inline
     // tokenizer sees the code span first, so the image syntax stays text.
