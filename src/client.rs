@@ -230,6 +230,37 @@ impl AppFlowyClient {
         self.login().await
     }
 
+    /// Refresh using `candidate` instead of the stored refresh token,
+    /// transactionally: the candidate is installed only while the refresh
+    /// attempt runs, and a failed attempt restores the previously stored
+    /// token — a mistyped or expired candidate must never destroy a still
+    /// valid one. Success commits the full token response (which itself
+    /// carries the rotated refresh token), so nothing of the candidate is
+    /// kept afterwards. An empty candidate counts as "use the stored token".
+    ///
+    /// Runs under the reauth lock like [`Self::refresh_token_locked`], and
+    /// like it must not be called while already holding that lock.
+    pub async fn refresh_token_with(
+        &self,
+        candidate: Option<String>,
+    ) -> Result<TokenResponse> {
+        let _guard = self.inner.reauth_lock.lock().await;
+        match candidate.filter(|token| !token.is_empty()) {
+            Some(candidate) => {
+                let previous = self.refresh_token_value().await;
+                self.set_refresh_token(Some(candidate)).await;
+                match self.refresh_token().await {
+                    Ok(token) => Ok(token),
+                    Err(err) => {
+                        self.set_refresh_token(previous).await;
+                        Err(err)
+                    }
+                }
+            }
+            None => self.refresh_token().await,
+        }
+    }
+
     pub async fn get_database_fields(
         &self,
         workspace_id: &str,
@@ -1065,5 +1096,104 @@ mod tests {
             );
             mock.delete_async().await;
         }
+    }
+
+    /// Regression for WIL-21 Bug 3: a candidate refresh token the server
+    /// rejects must not destroy the stored one — previously the MCP
+    /// `appflowy_refresh_token` tool overwrote the stored token *before*
+    /// validating it, so one mistyped token bricked token-only sessions.
+    #[tokio::test]
+    async fn refresh_token_with_failed_candidate_keeps_stored_token() {
+        use httpmock::prelude::*;
+        let server = MockServer::start_async().await;
+        let mock = server
+            .mock_async(|when, then| {
+                when.method(POST)
+                    .path("/gotrue/token")
+                    .json_body(serde_json::json!({"refresh_token": "typo"}));
+                then.status(400)
+                    .json_body(serde_json::json!({"code": 400, "msg": "Invalid refresh token"}));
+            })
+            .await;
+        let client = AppFlowyClient::new(None, None, server.base_url());
+        client.set_access_token(Some("old-access".into())).await;
+        client.set_refresh_token(Some("good".into())).await;
+
+        let err = client
+            .refresh_token_with(Some("typo".into()))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::Api { .. }), "{err:?}");
+        assert_eq!(client.refresh_token_value().await.as_deref(), Some("good"));
+        assert_eq!(client.access_token().await.as_deref(), Some("old-access"));
+        mock.assert_async().await;
+    }
+
+    /// The success half of the transaction: the candidate is sent, and the
+    /// rotated tokens from the response are committed.
+    #[tokio::test]
+    async fn refresh_token_with_success_commits_rotated_tokens() {
+        use httpmock::prelude::*;
+        let server = MockServer::start_async().await;
+        let mock = server
+            .mock_async(|when, then| {
+                when.method(POST)
+                    .path("/gotrue/token")
+                    .json_body(serde_json::json!({"refresh_token": "candidate"}));
+                then.status(200).json_body(serde_json::json!({
+                    "access_token": "new-access",
+                    "refresh_token": "new-refresh",
+                    "expires_in": 3600,
+                }));
+            })
+            .await;
+        let client = AppFlowyClient::new(None, None, server.base_url());
+        client.set_access_token(Some("old-access".into())).await;
+        client.set_refresh_token(Some("old-refresh".into())).await;
+
+        client
+            .refresh_token_with(Some("candidate".into()))
+            .await
+            .expect("refresh succeeds");
+        assert_eq!(
+            client.access_token().await.as_deref(),
+            Some("new-access")
+        );
+        assert_eq!(
+            client.refresh_token_value().await.as_deref(),
+            Some("new-refresh")
+        );
+        mock.assert_async().await;
+    }
+
+    /// No candidate (or an empty one) behaves like `refresh_token_locked`:
+    /// the stored token is used and there is nothing to roll back.
+    #[tokio::test]
+    async fn refresh_token_with_none_uses_stored_token() {
+        use httpmock::prelude::*;
+        let server = MockServer::start_async().await;
+        let mock = server
+            .mock_async(|when, then| {
+                when.method(POST)
+                    .path("/gotrue/token")
+                    .json_body(serde_json::json!({"refresh_token": "stored"}));
+                then.status(200).json_body(serde_json::json!({
+                    "access_token": "new-access",
+                    "refresh_token": "new-refresh",
+                }));
+            })
+            .await;
+        let client = AppFlowyClient::new(None, None, server.base_url());
+        client.set_refresh_token(Some("stored".into())).await;
+
+        client
+            .refresh_token_with(Some(String::new()))
+            .await
+            .expect("refresh succeeds");
+        assert_eq!(
+            client.refresh_token_value().await.as_deref(),
+            Some("new-refresh")
+        );
+        mock.assert_async().await;
     }
 }

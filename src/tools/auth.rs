@@ -22,7 +22,9 @@ pub struct LoginRequest {
 #[derive(Debug, Default, Deserialize, rmcp::schemars::JsonSchema)]
 #[serde(default)]
 pub struct RefreshTokenRequest {
-    /// Refresh token to store before refreshing. Uses the stored one if omitted.
+    /// Candidate refresh token to refresh with. It replaces the stored one
+    /// only if the refresh succeeds; a failure keeps the previously stored
+    /// token. Uses the stored token when omitted.
     pub refresh_token: Option<String>,
 }
 
@@ -61,12 +63,11 @@ impl AppServer {
         &self,
         Parameters(request): Parameters<RefreshTokenRequest>,
     ) -> Result<Json<Value>, ToolError> {
-        if let Some(token) = request.refresh_token {
-            self.client.set_refresh_token(Some(token)).await;
-        }
-        // Locked variant: see the comment in `appflowy_login`.
+        // Transactional: a provided token is tried as a candidate and the
+        // previously stored token is restored when the refresh fails — a
+        // mistyped or expired token must not destroy a still valid one.
         self.client
-            .refresh_token_locked()
+            .refresh_token_with(request.refresh_token)
             .await
             .map_err(map_tool_error)?;
         Ok(Json(json!({ "status": "refreshed" })))

@@ -212,6 +212,84 @@ fn cells_or_none(cells: Value) -> Option<Value> {
 /// server which keeps handing out cursors.
 const MAX_HISTORY_PAGES: usize = 100;
 
+/// Fetch every remaining page of a database history listing (the
+/// `fetch_all` path of `appflowy_list_database_history`) and merge the
+/// items arrays into the last page's envelope.
+///
+/// Incomplete results are never reported as success: a follow-up page with
+/// an unrecognized shape, or a still-live cursor at the [`MAX_HISTORY_PAGES`]
+/// cap, is a hard error rather than a silently truncated merge.
+async fn fetch_all_history_pages(
+    client: &crate::client::AppFlowyClient,
+    base_path: &str,
+    query: &[(&str, String)],
+) -> crate::error::Result<Value> {
+    let first_page = client
+        .request(Method::GET, base_path, Some(query), None)
+        .await?;
+    // Merging needs a recognized items array; unknown shapes fall back
+    // to the first page verbatim.
+    let mut merged = match history_page_items(&first_page) {
+        Some(items) => items,
+        None => return Ok(first_page),
+    };
+    let mut last_page = first_page;
+    let mut pages_fetched = 1usize;
+    while let Some(cursor) = history_next_cursor(&last_page) {
+        // A remaining cursor at the page cap means the merged result would
+        // be partial; reporting it as success would silently lose history,
+        // the same failure mode the unrecognized-shape error below guards
+        // against. Fail loudly for both response shapes.
+        if pages_fetched >= MAX_HISTORY_PAGES {
+            return Err(Error::Other(format!(
+                "History pagination hit the limit of {MAX_HISTORY_PAGES} \
+                 pages and a next cursor ({cursor:?}) still remains; the \
+                 merged result would silently report partial history as \
+                 complete. Re-run without fetch_all and continue manually \
+                 from cursor {cursor:?}."
+            )));
+        }
+        let mut page_query = query.to_vec();
+        page_query.push(("cursor", cursor.clone()));
+        let next_page = client
+            .request(Method::GET, base_path, Some(&page_query), None)
+            .await?;
+        // The fetch succeeded, so an unrecognized shape is a real
+        // contract change — silently dropping the page (or stopping with
+        // a stale cursor that looks like "done") would report a partial
+        // merge as success. Fail loudly, naming the offending page.
+        let Some(items) = history_page_items(&next_page) else {
+            return Err(Error::Other(format!(
+                "History page {} (cursor {:?}) had no recognizable items \
+                 array (looked for a top-level array, or data/items/history); \
+                 returning unmerged results would silently lose this page.",
+                pages_fetched + 1,
+                cursor
+            )));
+        };
+        merged.extend(items);
+        last_page = next_page;
+        pages_fetched += 1;
+    }
+    // Keep the last page's envelope (its cursor state is the current one)
+    // and swap its items array for the merged list.
+    let mut result = last_page;
+    match &mut result {
+        Value::Array(_) => result = Value::Array(merged),
+        Value::Object(map) => {
+            if let Some(key) = ["data", "items", "history"]
+                .into_iter()
+                .find(|key| map.get(*key).is_some_and(Value::is_array))
+            {
+                map.insert(key.to_string(), Value::Array(merged));
+            }
+            map.insert("pages_fetched".into(), json!(pages_fetched));
+        }
+        _ => {}
+    }
+    Ok(result)
+}
+
 /// Candidates for the next-page cursor of a history response: top level or a
 /// nested `pagination` object (the web client expands it as the `cursor`
 /// query param). A null or empty value means there is no next page.
@@ -812,66 +890,17 @@ impl AppServer {
         if let Some(since) = request.since {
             query.push(("since", since.to_string()));
         }
-        let first_page = self
-            .client
-            .request(Method::GET, &base_path, Some(&query), None)
-            .await
-            .map_err(map_tool_error)?;
         if !request.fetch_all.unwrap_or(false) {
-            return Ok(Json(first_page));
-        }
-        // Merging needs a recognized items array; unknown shapes fall back
-        // to the first page verbatim.
-        let mut merged = match history_page_items(&first_page) {
-            Some(items) => items,
-            None => return Ok(Json(first_page)),
-        };
-        let mut last_page = first_page;
-        let mut pages_fetched = 1usize;
-        while let Some(cursor) = history_next_cursor(&last_page) {
-            if pages_fetched >= MAX_HISTORY_PAGES {
-                break;
-            }
-            let mut page_query = query.clone();
-            page_query.push(("cursor", cursor.clone()));
-            let next_page = self
+            let first_page = self
                 .client
-                .request(Method::GET, &base_path, Some(&page_query), None)
+                .request(Method::GET, &base_path, Some(&query), None)
                 .await
                 .map_err(map_tool_error)?;
-            // The fetch succeeded, so an unrecognized shape is a real
-            // contract change — silently dropping the page (or stopping with
-            // a stale cursor that looks like "done") would report a partial
-            // merge as success. Fail loudly, naming the offending page.
-            let Some(items) = history_page_items(&next_page) else {
-                return Err(map_tool_error(Error::Other(format!(
-                    "History page {} (cursor {:?}) had no recognizable items \
-                     array (looked for a top-level array, or data/items/history); \
-                     returning unmerged results would silently lose this page.",
-                    pages_fetched + 1,
-                    cursor
-                ))));
-            };
-            merged.extend(items);
-            last_page = next_page;
-            pages_fetched += 1;
+            return Ok(Json(first_page));
         }
-        // Keep the last page's envelope (its cursor state is the current one)
-        // and swap its items array for the merged list.
-        let mut result = last_page;
-        match &mut result {
-            Value::Array(_) => result = Value::Array(merged),
-            Value::Object(map) => {
-                if let Some(key) = ["data", "items", "history"]
-                    .into_iter()
-                    .find(|key| map.get(*key).is_some_and(Value::is_array))
-                {
-                    map.insert(key.to_string(), Value::Array(merged));
-                }
-                map.insert("pages_fetched".into(), json!(pages_fetched));
-            }
-            _ => {}
-        }
+        let result = fetch_all_history_pages(&self.client, &base_path, &query)
+            .await
+            .map_err(map_tool_error)?;
         Ok(Json(result))
     }
 
@@ -985,5 +1014,118 @@ mod tests {
         // Empty string or null means "no next page".
         assert_eq!(history_next_cursor(&json!({"next_cursor": ""})), None);
         assert_eq!(history_next_cursor(&json!({})), None);
+    }
+
+    // ---------------------------------------------------------------
+    // WIL-21 Bug 7: fetch_all must never silently report partial
+    // history as complete. These drive `fetch_all_history_pages`
+    // against an httpmock server paging one item at a time.
+    // ---------------------------------------------------------------
+
+    const HISTORY_PATH: &str = "/api/workspace/ws/database/db/history";
+
+    /// Serve `page_count` one-item pages under the object `{"items": [...]}`
+    /// shape: the cursor-less request yields page 1, `?cursor=cN` yields
+    /// page N+1; `last_next_cursor` controls whether the final page still
+    /// advertises a next page. Must not use a top-level `data` key —
+    /// `client.request` unwraps that envelope and would drop the cursor.
+    async fn mock_history_pages(
+        server: &httpmock::MockServer,
+        page_count: usize,
+        last_next_cursor: Option<&str>,
+    ) {
+        let page_body = |page: usize| {
+            if page < page_count {
+                json!({"items": [{"v": page}], "next_cursor": format!("c{page}")})
+            } else {
+                match last_next_cursor {
+                    Some(cursor) => json!({"items": [{"v": page}], "next_cursor": cursor}),
+                    None => json!({"items": [{"v": page}]}),
+                }
+            }
+        };
+        // Specific cursor mocks must be registered before the unconstrained
+        // page-1 mock: httpmock serves the first matching mock, so a
+        // path-only mock created first would answer every follow-up page.
+        for page in 2..=page_count {
+            let body = page_body(page);
+            let cursor = format!("c{}", page - 1);
+            server
+                .mock_async(move |when, then| {
+                    when.method(httpmock::Method::GET)
+                        .path(HISTORY_PATH)
+                        .query_param("cursor", cursor);
+                    then.status(200).json_body(body);
+                })
+                .await;
+        }
+        let body = page_body(1);
+        server
+            .mock_async(move |when, then| {
+                when.method(httpmock::Method::GET).path(HISTORY_PATH);
+                then.status(200).json_body(body);
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn fetch_all_merges_follow_up_pages() {
+        let server = httpmock::MockServer::start_async().await;
+        mock_history_pages(&server, 3, None).await;
+        let client = crate::client::AppFlowyClient::new(None, None, server.base_url());
+        let result = fetch_all_history_pages(&client, HISTORY_PATH, &[])
+            .await
+            .expect("complete pagination merges");
+        assert_eq!(result["items"].as_array().unwrap().len(), 3);
+        assert_eq!(result["pages_fetched"], json!(3));
+        // Normal termination: no truncation signal anywhere.
+        assert!(result.get("next_cursor").is_none());
+    }
+
+    /// Exactly at the page cap with no cursor left is a normal, complete
+    /// result — the cap only errors when a next page remains.
+    #[tokio::test]
+    async fn fetch_all_completes_exactly_at_page_cap() {
+        let server = httpmock::MockServer::start_async().await;
+        mock_history_pages(&server, MAX_HISTORY_PAGES, None).await;
+        let client = crate::client::AppFlowyClient::new(None, None, server.base_url());
+        let result = fetch_all_history_pages(&client, HISTORY_PATH, &[])
+            .await
+            .expect("cap without a remaining cursor is complete");
+        assert_eq!(result["items"].as_array().unwrap().len(), MAX_HISTORY_PAGES);
+        assert_eq!(result["pages_fetched"], json!(MAX_HISTORY_PAGES));
+    }
+
+    /// A cursor still live at the cap used to fall out of the loop and
+    /// return the partial merge as success; it must now be a hard error.
+    #[tokio::test]
+    async fn fetch_all_errors_when_cursor_survives_page_cap() {
+        let server = httpmock::MockServer::start_async().await;
+        mock_history_pages(&server, MAX_HISTORY_PAGES, Some("c100")).await;
+        let client = crate::client::AppFlowyClient::new(None, None, server.base_url());
+        let err = fetch_all_history_pages(&client, HISTORY_PATH, &[])
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("limit of 100 pages"), "{msg}");
+        assert!(msg.contains("c100"), "{msg}");
+    }
+
+    /// Bare-array pages carry no cursor, so the array shape terminates
+    /// after the first page and comes back as a merged array.
+    #[tokio::test]
+    async fn fetch_all_array_shape_first_page_stays_an_array() {
+        let server = httpmock::MockServer::start_async().await;
+        server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::GET).path(HISTORY_PATH);
+                then.status(200).json_body(json!([{"v": 1}, {"v": 2}]));
+            })
+            .await;
+        let client = crate::client::AppFlowyClient::new(None, None, server.base_url());
+        let result = fetch_all_history_pages(&client, HISTORY_PATH, &[])
+            .await
+            .expect("array shape merges");
+        assert_eq!(result, json!([{"v": 1}, {"v": 2}]));
     }
 }
