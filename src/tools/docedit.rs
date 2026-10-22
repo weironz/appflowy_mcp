@@ -357,7 +357,7 @@ mod tests {
         // with the util tests.
         let raw = "~/backups/page.snapshot.json";
         let resolved = snapshot_file_path(raw);
-        if resolved == PathBuf::from(raw) {
+        if resolved == *raw {
             return;
         }
         assert!(

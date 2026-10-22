@@ -155,9 +155,7 @@ fn cleanup_stale_at(dir: &Path, file_name: &str, stem: &str, now: SystemTime) {
     for entry in entries.flatten() {
         let name = entry.file_name();
         let Some(name) = name.to_str() else { continue };
-        if name == backup {
-            let _ = std::fs::remove_file(entry.path());
-        } else if name.starts_with(&staging_prefix) && staging_is_stale(&entry, now) {
+        if name == backup || (name.starts_with(&staging_prefix) && staging_is_stale(&entry, now)) {
             let _ = std::fs::remove_file(entry.path());
         }
     }

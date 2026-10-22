@@ -740,7 +740,7 @@ mod tests {
         // with the util tests.
         let raw = "~/data/export.zip";
         let resolved = local_import_path(raw);
-        if resolved == PathBuf::from(raw) {
+        if resolved == *raw {
             return;
         }
         assert!(
