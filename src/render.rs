@@ -236,8 +236,9 @@ impl<'a> Renderer<'a> {
                         .map(json_to_display)
                         .unwrap_or_default();
                     self.lines.push(format!("{prefix}```{language}"));
-                    self.lines.push(text.clone());
-                    self.lines.push("```".to_string());
+                    self.lines
+                        .extend(text.split('\n').map(|line| format!("{prefix}{line}")));
+                    self.lines.push(format!("{prefix}```"));
                     self.lines.push(String::new());
                 }
                 "divider" => {
@@ -246,7 +247,7 @@ impl<'a> Renderer<'a> {
                     // can mistake for YAML front matter and swallow up to the
                     // next `---`. `***` is an equally valid divider that never
                     // opens front matter.
-                    self.lines.push("***".to_string());
+                    self.lines.push(format!("{prefix}***"));
                     self.lines.push(String::new());
                 }
                 "image" => {
@@ -292,8 +293,9 @@ impl<'a> Renderer<'a> {
                     let formula = formula.trim();
                     if !formula.is_empty() {
                         self.lines.push(format!("{prefix}$$"));
-                        self.lines.push(formula.to_string());
-                        self.lines.push("$$".to_string());
+                        self.lines
+                            .extend(formula.split('\n').map(|line| format!("{prefix}{line}")));
+                        self.lines.push(format!("{prefix}$$"));
                         self.lines.push(String::new());
                     }
                 }
@@ -424,5 +426,133 @@ pub fn sanitize_filename(name: &str, fallback: &str) -> String {
         fallback.to_string()
     } else {
         cleaned.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use serde_json::json;
+
+    use super::document_to_markdown;
+    use crate::collab::{BlockEntry, Document};
+    use crate::markdown::{parse_markdown_to_blocks, Block};
+
+    fn entry(ty: &str, text: &str, children: &str) -> BlockEntry {
+        BlockEntry {
+            ty: ty.to_string(),
+            data: json!({ "delta": [{ "insert": text }] }),
+            children: children.to_string(),
+            external_id: None,
+        }
+    }
+
+    fn list_document(extra_children: Vec<(&str, BlockEntry)>) -> Document {
+        let mut blocks = HashMap::from([
+            ("page".to_string(), entry("page", "", "root-children")),
+            (
+                "item".to_string(),
+                entry("bulleted_list", "item", "item-children"),
+            ),
+            (
+                "sub".to_string(),
+                entry("bulleted_list", "sub", "sub-children"),
+            ),
+            (
+                "next".to_string(),
+                entry("bulleted_list", "next", "next-children"),
+            ),
+        ]);
+        let mut item_children = Vec::new();
+        for (id, block) in extra_children {
+            blocks.insert(id.to_string(), block);
+            item_children.push(id.to_string());
+        }
+        item_children.push("sub".to_string());
+
+        Document {
+            page_id: "page".to_string(),
+            blocks,
+            children_map: HashMap::from([
+                (
+                    "root-children".to_string(),
+                    vec!["item".to_string(), "next".to_string()],
+                ),
+                ("item-children".to_string(), item_children),
+            ]),
+            text_map: HashMap::new(),
+        }
+    }
+
+    fn text(block: &Block) -> &str {
+        block.data["delta"][0]["insert"].as_str().unwrap()
+    }
+
+    #[test]
+    fn list_paragraph_and_nested_list_round_trip_with_top_level_sibling() {
+        let document = list_document(vec![(
+            "paragraph",
+            entry("paragraph", "under item", "paragraph-children"),
+        )]);
+
+        let markdown = document_to_markdown(&document, None);
+        let blocks = parse_markdown_to_blocks(&markdown, None);
+
+        assert_eq!(blocks.len(), 2, "markdown:\n{markdown}");
+        assert_eq!(blocks[0].ty, "bulleted_list");
+        assert_eq!(text(&blocks[0]), "item");
+        assert_eq!(blocks[0].children.len(), 2);
+        assert_eq!(blocks[0].children[0].ty, "paragraph");
+        assert_eq!(text(&blocks[0].children[0]), "under item");
+        assert_eq!(blocks[0].children[1].ty, "bulleted_list");
+        assert_eq!(text(&blocks[0].children[1]), "sub");
+        assert_eq!(blocks[1].ty, "bulleted_list");
+        assert_eq!(text(&blocks[1]), "next");
+    }
+
+    #[test]
+    fn list_code_and_nested_list_round_trip_with_top_level_sibling() {
+        let mut code = entry("code", "let x = 1;\nprintln!(\"{x}\");", "code-children");
+        code.data["language"] = json!("rust");
+        let document = list_document(vec![("code", code)]);
+
+        let markdown = document_to_markdown(&document, None);
+        let blocks = parse_markdown_to_blocks(&markdown, None);
+
+        assert!(markdown.contains("  let x = 1;\n  println!(\"{x}\");\n  ```"));
+        assert_eq!(blocks.len(), 2, "markdown:\n{markdown}");
+        assert_eq!(blocks[0].children.len(), 2);
+        assert_eq!(blocks[0].children[0].ty, "code");
+        assert_eq!(blocks[0].children[0].data["language"], "rust");
+        assert_eq!(
+            text(&blocks[0].children[0]),
+            "let x = 1;\nprintln!(\"{x}\");"
+        );
+        assert_eq!(blocks[0].children[1].ty, "bulleted_list");
+        assert_eq!(text(&blocks[0].children[1]), "sub");
+        assert_eq!(blocks[1].ty, "bulleted_list");
+        assert_eq!(text(&blocks[1]), "next");
+    }
+
+    #[test]
+    fn unindented_paragraph_ends_list_while_nested_lists_still_nest() {
+        let blocks =
+            parse_markdown_to_blocks("- item\n  under item\n  - sub\nafter list\n- next\n", None);
+
+        assert_eq!(blocks.len(), 3);
+        assert_eq!(blocks[0].ty, "bulleted_list");
+        assert_eq!(blocks[0].children.len(), 2);
+        assert_eq!(blocks[0].children[0].ty, "paragraph");
+        assert_eq!(text(&blocks[0].children[0]), "under item");
+        assert_eq!(blocks[0].children[1].ty, "bulleted_list");
+        assert_eq!(text(&blocks[0].children[1]), "sub");
+        assert_eq!(blocks[1].ty, "paragraph");
+        assert_eq!(text(&blocks[1]), "after list");
+        assert_eq!(blocks[2].ty, "bulleted_list");
+        assert_eq!(text(&blocks[2]), "next");
+
+        let standalone = parse_markdown_to_blocks("  standalone indent", None);
+        assert_eq!(text(&standalone[0]), "  standalone indent");
     }
 }

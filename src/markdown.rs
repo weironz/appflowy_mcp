@@ -692,6 +692,8 @@ pub fn parse_markdown_to_blocks(
     let mut blocks: Vec<Block> = Vec::new();
     let mut code_lines: Vec<String> = Vec::new();
     let mut code_language = String::new();
+    let mut code_indent = String::new();
+    let mut code_level = 0usize;
     let mut in_code_block = false;
 
     // Stack of (indent_level, path) for the currently open list items; a path
@@ -724,6 +726,23 @@ pub fn parse_markdown_to_blocks(
         list_stack.push((level, path));
     }
 
+    fn push_non_list_block(
+        blocks: &mut Vec<Block>,
+        list_stack: &mut Vec<(usize, Vec<usize>)>,
+        level: usize,
+        block: Block,
+    ) {
+        while matches!(list_stack.last(), Some(&(top, _)) if top >= level) {
+            list_stack.pop();
+        }
+        match list_stack.last() {
+            Some((_, parent_path)) => {
+                block_at_path_mut(blocks, parent_path).children.push(block);
+            }
+            None => blocks.push(block),
+        }
+    }
+
     // `&str` borrows, not owned Strings: the loop below re-clones lines only
     // where they actually outlive the iteration (code blocks, tables).
     let mut lines: Vec<&str> = content.lines().collect();
@@ -737,18 +756,22 @@ pub fn parse_markdown_to_blocks(
 
         if let Some(fence_info) = stripped.strip_prefix("```") {
             if in_code_block {
-                blocks.push(Block::new(
+                let block = Block::new(
                     "code",
                     json!({
                         "language": if code_language.is_empty() { "text" } else { &code_language },
                         "delta": [{ "insert": code_lines.join("\n") }],
                     }),
-                ));
+                );
+                push_non_list_block(&mut blocks, &mut list_stack, code_level, block);
                 code_lines.clear();
                 code_language.clear();
+                code_indent.clear();
                 in_code_block = false;
             } else {
-                list_stack.clear();
+                code_level = list_indent_level(line);
+                code_indent =
+                    line[..line.len() - line.trim_start_matches([' ', '\t']).len()].to_string();
                 code_language = fence_info.trim().to_string();
                 in_code_block = true;
             }
@@ -757,7 +780,7 @@ pub fn parse_markdown_to_blocks(
         }
 
         if in_code_block {
-            code_lines.push(line.to_string());
+            code_lines.push(line.strip_prefix(&code_indent).unwrap_or(line).to_string());
             i += 1;
             continue;
         }
@@ -771,8 +794,13 @@ pub fn parse_markdown_to_blocks(
         }
 
         if stripped == "---" || stripped == "***" {
-            list_stack.clear();
-            blocks.push(Block::new("divider", json!({})));
+            let level = list_indent_level(line);
+            push_non_list_block(
+                &mut blocks,
+                &mut list_stack,
+                level,
+                Block::new("divider", json!({})),
+            );
             i += 1;
             continue;
         }
@@ -785,29 +813,50 @@ pub fn parse_markdown_to_blocks(
                 body.push(lines[j].to_string());
                 j += 1;
             }
-            list_stack.clear();
-            blocks.push(table_block(header, &body));
+            let level = list_indent_level(line);
+            push_non_list_block(
+                &mut blocks,
+                &mut list_stack,
+                level,
+                table_block(header, &body),
+            );
             i = j;
             continue;
         }
 
         if stripped == "$$" {
-            let mut formula_lines: Vec<&str> = Vec::new();
+            let level = list_indent_level(line);
+            let indent = &line[..line.len() - line.trim_start_matches([' ', '\t']).len()];
+            let mut formula_lines: Vec<String> = Vec::new();
             let mut j = i + 1;
             while j < total && lines[j].trim() != "$$" {
-                formula_lines.push(lines[j]);
+                formula_lines.push(
+                    lines[j]
+                        .strip_prefix(indent)
+                        .unwrap_or(lines[j])
+                        .to_string(),
+                );
                 j += 1;
             }
-            list_stack.clear();
-            blocks.push(math_block(formula_lines.join("\n")));
+            push_non_list_block(
+                &mut blocks,
+                &mut list_stack,
+                level,
+                math_block(formula_lines.join("\n")),
+            );
             i = if j < total { j + 1 } else { j };
             continue;
         }
 
         if let Some(math) = math_block_pattern().captures(stripped) {
             if let Some(formula) = math.name("formula") {
-                list_stack.clear();
-                blocks.push(math_block(formula.as_str().to_string()));
+                let level = list_indent_level(line);
+                push_non_list_block(
+                    &mut blocks,
+                    &mut list_stack,
+                    level,
+                    math_block(formula.as_str().to_string()),
+                );
                 i += 1;
                 continue;
             }
@@ -820,44 +869,26 @@ pub fn parse_markdown_to_blocks(
                 Some(resolve) => resolve(url, alt),
                 None => url.to_string(),
             };
-            // An indented full-line image belongs to the enclosing list item:
-            // the exporter renders an image child of a list item on its own
-            // line indented under it (`- item` then `  ![alt](url)`). Attach
-            // it under the deepest open item whose indent level is lower —
-            // nesting must survive an export->import round trip. The stack is
-            // popped at that boundary but the image itself is not pushed
-            // (images never parent list items), so following items continue
-            // to nest under their real list parent. An unindented image pops
-            // the whole stack, identical to clearing it.
             let level = list_indent_level(line);
-            while matches!(list_stack.last(), Some(&(top, _)) if top >= level) {
-                list_stack.pop();
-            }
             let block = image_block(image_url, alt.to_string());
-            match list_stack.last() {
-                Some((_, parent_path)) => {
-                    let parent = block_at_path_mut(&mut blocks, parent_path);
-                    parent.children.push(block);
-                }
-                None => blocks.push(block),
-            }
+            push_non_list_block(&mut blocks, &mut list_stack, level, block);
             i += 1;
             continue;
         }
 
         if let Some(heading) = heading_pattern().captures(stripped) {
-            let level = heading.get(1).map(|m| m.as_str().len()).unwrap_or(0);
+            let heading_level = heading.get(1).map(|m| m.as_str().len()).unwrap_or(0);
             let text = heading.get(2).map(|m| m.as_str()).unwrap_or("");
-            list_stack.clear();
             // Inline images inside the heading text break out as trailing
             // blocks (the heading delta cannot carry them).
             let mut run = parse_rich_blocks(text, resolver.as_deref_mut());
             let head = run.first().cloned().unwrap_or_else(|| paragraph_block(""));
-            blocks.push(Block::with_children(
+            let block = Block::with_children(
                 "heading",
-                json!({ "level": level, "delta": head.data.get("delta").cloned().unwrap_or(json!([])) }),
+                json!({ "level": heading_level, "delta": head.data.get("delta").cloned().unwrap_or(json!([])) }),
                 run.drain(1..).collect(),
-            ));
+            );
+            push_non_list_block(&mut blocks, &mut list_stack, list_indent_level(line), block);
             i += 1;
             continue;
         }
@@ -913,34 +944,40 @@ pub fn parse_markdown_to_blocks(
         }
 
         if let Some(quote_text) = stripped.strip_prefix("> ") {
-            list_stack.clear();
             let run = parse_rich_blocks(quote_text, resolver.as_deref_mut());
             let mut run_iter = run.into_iter();
             let head = run_iter.next().unwrap_or_else(|| paragraph_block(""));
-            blocks.push(Block::with_children(
-                "quote",
-                delta_data(delta_ops_of(&head)),
-                run_iter.collect(),
-            ));
+            let block =
+                Block::with_children("quote", delta_data(delta_ops_of(&head)), run_iter.collect());
+            push_non_list_block(&mut blocks, &mut list_stack, list_indent_level(line), block);
             i += 1;
             continue;
         }
 
-        if !stripped.is_empty() {
-            list_stack.clear();
+        let level = list_indent_level(line);
+        while matches!(list_stack.last(), Some(&(top, _)) if top >= level) {
+            list_stack.pop();
         }
-        blocks.extend(parse_rich_blocks(line, resolver.as_deref_mut()));
+        let paragraph = if !list_stack.is_empty() {
+            line.trim_start_matches([' ', '\t'])
+        } else {
+            line
+        };
+        for block in parse_rich_blocks(paragraph, resolver.as_deref_mut()) {
+            push_non_list_block(&mut blocks, &mut list_stack, level, block);
+        }
         i += 1;
     }
 
     if in_code_block && !code_lines.is_empty() {
-        blocks.push(Block::new(
+        let block = Block::new(
             "code",
             json!({
                 "language": if code_language.is_empty() { "text" } else { &code_language },
                 "delta": [{ "insert": code_lines.join("\n") }],
             }),
-        ));
+        );
+        push_non_list_block(&mut blocks, &mut list_stack, code_level, block);
     }
 
     blocks
