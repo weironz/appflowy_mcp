@@ -17,7 +17,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use clap::Args;
 use serde_json::{json, Value};
@@ -37,7 +37,9 @@ const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 #[derive(Args)]
 pub struct UpdateArgs {
     /// Pin the release to install (default: the latest release; also read
-    /// from APPFLOWY_VERSION, matching the install scripts).
+    /// from APPFLOWY_VERSION, matching the install scripts). Must be a
+    /// stable `X.Y.Z`: prerelease/build suffixes are rejected rather than
+    /// silently mapped to their stable core.
     #[arg(long, value_name = "X.Y.Z")]
     pub version: Option<String>,
     /// Only check whether an update exists; download and replace nothing.
@@ -45,8 +47,8 @@ pub struct UpdateArgs {
     pub check: bool,
 }
 
-/// Strict X.Y.Z comparison without pulling in a semver crate (release tags
-/// are always `vX.Y.Z`).
+/// Strict X.Y.Z comparison without pulling in a semver crate (stable release
+/// tags are always `vX.Y.Z`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct Version(u64, u64, u64);
 
@@ -56,12 +58,18 @@ impl std::fmt::Display for Version {
     }
 }
 
-/// Parse `0.9.0` / `v0.9.0` / `0.9.0-rc.1`, rejecting anything without all
-/// three numeric components.
+/// Parse a stable `0.9.0` / `v0.9.0`, rejecting anything without all three
+/// numeric components as well as prerelease / build-metadata suffixes.
+///
+/// Suffixes used to be truncated (`0.9.0-rc.1` became `0.9.0`), which silently
+/// queried and installed the stable tag the user never asked for. Until the
+/// updater compares full semver, a suffix is a validation error instead.
 fn parse_version(raw: &str) -> Option<Version> {
     let raw = raw.trim().trim_start_matches(['v', 'V']);
-    let core = raw.split(['-', '+']).next()?;
-    let mut parts = core.split('.');
+    if raw.contains(['-', '+']) {
+        return None;
+    }
+    let mut parts = raw.split('.');
     let major = parts.next()?.parse().ok()?;
     let minor = parts.next()?.parse().ok()?;
     let patch = parts.next()?.parse().ok()?;
@@ -69,6 +77,20 @@ fn parse_version(raw: &str) -> Option<Version> {
         return None;
     }
     Some(Version(major, minor, patch))
+}
+
+/// Resolve a pinned `--version` / `APPFLOWY_VERSION` to its release tag.
+/// Prerelease and build suffixes are rejected here rather than silently
+/// truncated to their stable core, so a request for `0.9.0-rc.1` can never
+/// turn into a query or install of `v0.9.0`.
+fn resolve_pinned_release(pin: &str) -> Result<(String, Version)> {
+    let version = parse_version(pin).ok_or_else(|| {
+        Error::Validation(format!(
+            "version '{pin}' (want a stable X.Y.Z; prerelease/build suffixes \
+             such as '-rc.1' or '+build' are not supported)"
+        ))
+    })?;
+    Ok((format!("v{version}"), version))
 }
 
 /// Extract the trailing version token from `--version` output
@@ -90,6 +112,13 @@ fn asset_name(os: &str, arch: &str) -> Option<&'static str> {
     }
 }
 
+/// Upper bound on how long a staging file may exist before it is considered a
+/// crash leftover. Verification runs the downloaded binary once, so a live
+/// staging file exists for seconds; an hour is far beyond any plausible
+/// overlap with a concurrent update, while still letting the next run sweep
+/// a file abandoned by a dropped download or an interrupted install.
+const STAGING_STALE_AFTER: Duration = Duration::from_secs(60 * 60);
+
 /// Name of the staging file placed next to the target. Windows can only exec
 /// `*.exe`, so the download must carry the extension for the smoke test.
 fn staging_path(dir: &Path, stem: &str, pid: u32) -> PathBuf {
@@ -104,7 +133,20 @@ fn staging_path(dir: &Path, stem: &str, pid: u32) -> PathBuf {
 /// Remove leftovers from earlier update attempts next to the exe: the
 /// Windows `.old` backup (locked until the previous process exited) and any
 /// interrupted download's staging files.
+///
+/// Staging files are named `{stem}.new-{pid}`, so the prefix alone says
+/// nothing about whether the owning process is still running. A concurrent
+/// update's file must not be swept: only files whose mtime proves they are
+/// older than [`STAGING_STALE_AFTER`] are removed. `.old` needs no such
+/// guard — on Windows it is locked while the owning process still runs, and
+/// on Unix this updater never creates one.
 fn cleanup_stale(dir: &Path, file_name: &str, stem: &str) {
+    cleanup_stale_at(dir, file_name, stem, SystemTime::now());
+}
+
+/// [`cleanup_stale`] with an injectable clock, so the age threshold can be
+/// tested without mutating file timestamps.
+fn cleanup_stale_at(dir: &Path, file_name: &str, stem: &str, now: SystemTime) {
     let backup = format!("{file_name}.old");
     let staging_prefix = format!("{stem}.new-");
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -113,10 +155,27 @@ fn cleanup_stale(dir: &Path, file_name: &str, stem: &str) {
     for entry in entries.flatten() {
         let name = entry.file_name();
         let Some(name) = name.to_str() else { continue };
-        if name == backup || name.starts_with(&staging_prefix) {
+        if name == backup {
+            let _ = std::fs::remove_file(entry.path());
+        } else if name.starts_with(&staging_prefix) && staging_is_stale(&entry, now) {
             let _ = std::fs::remove_file(entry.path());
         }
     }
+}
+
+/// True only when a staging file's age is known and exceeds the threshold.
+/// `metadata()` / `modified()` failures (and future timestamps from clock
+/// skew) mean "cannot prove it is stale", so the file is left for the owning
+/// process or a later cleanup.
+fn staging_is_stale(entry: &std::fs::DirEntry, now: SystemTime) -> bool {
+    let Ok(metadata) = entry.metadata() else {
+        return false;
+    };
+    let Ok(modified) = metadata.modified() else {
+        return false;
+    };
+    now.duration_since(modified)
+        .is_ok_and(|age| age >= STAGING_STALE_AFTER)
 }
 
 /// The sibling entry point: `appflowy` <-> `appflowy-mcp`. A binary renamed
@@ -476,16 +535,16 @@ pub async fn cmd_update(args: &UpdateArgs, json_out: bool) -> Result<()> {
     // metadata (asset digests) is fetched only when a download is happening.
     let (tag, target, release) = match pin.as_deref() {
         Some(pin) => {
-            let version = parse_version(pin)
-                .ok_or_else(|| Error::Validation(format!("version '{pin}' (want X.Y.Z)")))?;
-            (format!("v{version}"), version, None)
+            let (tag, version) = resolve_pinned_release(pin)?;
+            (tag, version, None)
         }
         None => {
             let release = resolve_latest_tag(&client, API_BASE, github_token.as_deref()).await?;
             let tag = release.tag.clone();
             let version = parse_version(&tag).ok_or_else(|| {
                 Error::Other(format!(
-                    "latest release tag '{tag}' is not vX.Y.Z — pass --version to pin a release"
+                    "latest release tag '{tag}' is not a stable vX.Y.Z — \
+                     prerelease/build tags are not supported by this updater"
                 ))
             })?;
             (tag, version, Some(release))
@@ -642,6 +701,57 @@ mod tests {
     }
 
     #[test]
+    fn rejects_prerelease_and_build_metadata_instead_of_truncating() {
+        // These used to parse as their stable core (`0.9.0`), silently
+        // querying/installing a different tag than the one requested.
+        assert_eq!(parse_version("0.9.0-rc.1"), None);
+        assert_eq!(parse_version("v0.9.0-rc.1"), None);
+        assert_eq!(parse_version("0.9.0+build.7"), None);
+        assert_eq!(parse_version("1.2.3-"), None);
+        // The smoke test must not accept an rc binary output as stable
+        // either (that would also collapse the two versions).
+        assert_eq!(version_from_version_output("appflowy-cli 0.9.0-rc.1"), None);
+    }
+
+    #[test]
+    fn pinned_prereleases_are_rejected_not_retargeted_to_stable() {
+        assert_eq!(
+            resolve_pinned_release("v0.9.0").unwrap(),
+            ("v0.9.0".to_string(), Version(0, 9, 0))
+        );
+        for pin in ["0.9.0-rc.1", "v0.9.0-rc.1", "0.9.0+build.7"] {
+            match resolve_pinned_release(pin) {
+                Err(Error::Validation(message)) => {
+                    assert!(
+                        message.contains(pin),
+                        "message should quote {pin}: {message}"
+                    );
+                }
+                other => panic!("expected a validation error for {pin}, got {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn cmd_update_rejects_a_prerelease_pin_before_any_release_lookup() {
+        let args = UpdateArgs {
+            version: Some("0.9.0-rc.1".to_string()),
+            check: true,
+        };
+        match cmd_update(&args, true).await {
+            Err(Error::Validation(message)) => {
+                assert!(
+                    message.contains("0.9.0-rc.1"),
+                    "message should quote the pin: {message}"
+                );
+            }
+            // A regression that truncates the suffix would treat this as the
+            // stable 0.9.0 pin and return Ok from --check instead.
+            other => panic!("expected a validation error, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn orders_versions() {
         assert!(Version(0, 9, 0) > Version(0, 8, 1));
         assert!(Version(1, 0, 0) > Version(0, 99, 99));
@@ -686,6 +796,91 @@ mod tests {
         } else {
             assert_eq!(name, "appflowy.new-42");
         }
+    }
+
+    fn cleanup_dir(label: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "appflowy-update-{label}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn staging_name(pid: u32) -> String {
+        if cfg!(windows) {
+            format!("appflowy.new-{pid}.exe")
+        } else {
+            format!("appflowy.new-{pid}")
+        }
+    }
+
+    #[test]
+    fn keeps_staging_files_that_may_belong_to_a_concurrent_update() {
+        let dir = cleanup_dir("live-staging");
+        // A different pid than this test process: the old prefix-only sweep
+        // deleted exactly this file while its updater was verifying it.
+        let live = dir.join(staging_name(4242));
+        std::fs::write(&live, b"download").unwrap();
+        let unrelated = dir.join("notes.txt");
+        std::fs::write(&unrelated, b"keep").unwrap();
+
+        cleanup_stale_at(&dir, "appflowy", "appflowy", SystemTime::now());
+
+        assert!(
+            live.exists(),
+            "a concurrent update's staging file must not be swept"
+        );
+        assert!(unrelated.exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn removes_provably_stale_staging_and_backup_files() {
+        let dir = cleanup_dir("stale-staging");
+        let stale = dir.join(staging_name(5151));
+        std::fs::write(&stale, b"abandoned download").unwrap();
+        let backup = dir.join("appflowy.old");
+        std::fs::write(&backup, b"old binary").unwrap();
+        // Another app's staging file must survive even an old mtime.
+        let other = dir.join(staging_name(6161).replace("appflowy", "otherapp"));
+        std::fs::write(&other, b"other").unwrap();
+
+        // Inject a clock past the threshold instead of rewriting mtimes, so
+        // the test exercises the same age comparison production uses.
+        let later = SystemTime::now() + STAGING_STALE_AFTER + Duration::from_secs(60);
+        cleanup_stale_at(&dir, "appflowy", "appflowy", later);
+
+        assert!(!stale.exists(), "a provably stale staging file is swept");
+        assert!(!backup.exists(), "the Windows .old backup is swept");
+        assert!(other.exists(), "only this app's staging files are swept");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn sweeps_a_staging_file_whose_real_mtime_is_old() {
+        use std::fs::FileTimes;
+
+        let dir = cleanup_dir("old-mtime");
+        let stale = dir.join(staging_name(7171));
+        std::fs::write(&stale, b"abandoned download").unwrap();
+        let old = SystemTime::now() - STAGING_STALE_AFTER - Duration::from_secs(60);
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&stale)
+            .unwrap();
+        file.set_times(FileTimes::new().set_modified(old))
+            .unwrap();
+        drop(file);
+
+        // Production clock, real metadata: verifies the sweep reads mtime.
+        cleanup_stale(&dir, "appflowy", "appflowy");
+
+        assert!(!stale.exists());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

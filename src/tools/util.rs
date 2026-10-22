@@ -8,7 +8,9 @@ use std::time::Duration;
 
 use reqwest::Method;
 use rmcp::handler::server::tool::IntoCallToolResult;
-use rmcp::model::{CallToolResponse, CallToolResult, ContentBlock, ProgressNotificationParam, ProgressToken};
+use rmcp::model::{
+    CallToolResponse, CallToolResult, ContentBlock, ProgressNotificationParam, ProgressToken,
+};
 use rmcp::service::RequestContext;
 use rmcp::{ErrorData, RoleServer};
 use serde_json::{json, Value};
@@ -200,8 +202,9 @@ pub fn unique_path(path: &Path) -> PathBuf {
 
 /// Sends one `notifications/progress` message. Boxed so the sink can be
 /// shared; production wraps `Peer::notify_progress`, tests a recorder.
-pub type ProgressNotify =
-    Arc<dyn Fn(ProgressNotificationParam) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
+pub type ProgressNotify = Arc<
+    dyn Fn(ProgressNotificationParam) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync,
+>;
 
 /// Best-effort `notifications/progress` reporter for minute-long tools.
 ///
@@ -235,14 +238,17 @@ impl ToolProgress {
             return Self::inactive();
         };
         let peer = context.peer.clone();
-        Self::with_notify(token, Arc::new(move |param| {
-            let peer = peer.clone();
-            Box::pin(async move {
-                if let Err(e) = peer.notify_progress(param).await {
-                    tracing::warn!(%e, "failed to send notifications/progress");
-                }
-            })
-        }))
+        Self::with_notify(
+            token,
+            Arc::new(move |param| {
+                let peer = peer.clone();
+                Box::pin(async move {
+                    if let Err(e) = peer.notify_progress(param).await {
+                        tracing::warn!(%e, "failed to send notifications/progress");
+                    }
+                })
+            }),
+        )
     }
 
     /// Reporter over an arbitrary notification sink — the seam tests use to
@@ -441,10 +447,13 @@ mod tests {
         // must carry the client's token, monotone counters and the message.
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ProgressNotificationParam>();
         let token = ProgressToken(rmcp::model::NumberOrString::String("tok-7".into()));
-        let progress = ToolProgress::with_notify(token.clone(), Arc::new(move |param| {
-            tx.send(param).expect("sink alive");
-            Box::pin(async {})
-        }));
+        let progress = ToolProgress::with_notify(
+            token.clone(),
+            Arc::new(move |param| {
+                tx.send(param).expect("sink alive");
+                Box::pin(async {})
+            }),
+        );
         assert!(progress.is_active());
 
         progress.report(2, 5, "exporting").await;

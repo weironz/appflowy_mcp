@@ -15,7 +15,8 @@ use crate::importer::MarkdownImporter;
 use crate::markdown::{parse_content_to_blocks, parse_markdown_to_blocks};
 use crate::server::AppServer;
 use crate::tools::util::{
-    create_page_with_blocks, ensure_parent_is_not_workspace, map_tool_error, ToolError, ToolProgress,
+    create_page_with_blocks, ensure_parent_is_not_workspace, map_tool_error, ToolError,
+    ToolProgress,
 };
 
 /// Python `Field(..., min_length=1)` on strings, checked after trimming.

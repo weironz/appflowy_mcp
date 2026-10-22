@@ -195,7 +195,7 @@ impl MarkdownImporter {
         title: Option<&str>,
         upload_assets: bool,
     ) -> Result<ImportSummary> {
-        let path = resolve_user_path(file_path);
+        let path = resolve_user_path(file_path).await?;
         if !path.is_file() {
             return Err(Error::Validation(format!(
                 "Markdown file does not exist: {}",
@@ -235,7 +235,7 @@ impl MarkdownImporter {
         parent_view_id: &str,
         upload_assets: bool,
     ) -> Result<ImportSummary> {
-        let path = resolve_user_path(directory_path);
+        let path = resolve_user_path(directory_path).await?;
         if !path.is_dir() {
             return Err(Error::Validation(format!(
                 "Markdown directory does not exist: {}",
@@ -668,8 +668,22 @@ impl MarkdownImporter {
         upload_assets: bool,
     ) -> Vec<Block> {
         let url_map = if upload_assets {
-            self.upload_page_assets(content, markdown_dir, page_view_id)
+            match self
+                .upload_page_assets(content, markdown_dir, page_view_id)
                 .await
+            {
+                Ok(url_map) => url_map,
+                Err(e) => {
+                    // Off-worker path resolution failed wholesale; keep the
+                    // page importable with the original urls rather than
+                    // emitting a misleading "not found" warning per image.
+                    self.errors.push(ImportError {
+                        path: markdown_dir.display().to_string(),
+                        error: e.to_string(),
+                    });
+                    HashMap::new()
+                }
+            }
         } else {
             HashMap::new()
         };
@@ -686,13 +700,30 @@ impl MarkdownImporter {
     /// each unique file concurrently, and returns the
     /// `original url string -> uploaded url` map while appending to
     /// `uploaded_assets` / `warnings` / `errors`.
+    ///
+    /// Err means the blocking path-resolution task itself failed (a
+    /// `JoinError`); per-asset read/upload failures remain in `errors` and
+    /// leave the affected image on its original markdown url.
     async fn upload_page_assets(
         &mut self,
         content: &str,
         markdown_dir: &Path,
         page_view_id: &str,
-    ) -> HashMap<String, String> {
+    ) -> Result<HashMap<String, String>> {
         let references = scan_image_references(content);
+
+        // Resolve every unique local reference in one blocking task:
+        // `canonicalize` + `is_file` can stall on a slow or network disk, and
+        // a page may hold hundreds of image urls. Deduplicating first also
+        // avoids canonicalizing the same file once per occurrence.
+        let mut seen_local = HashSet::new();
+        let mut local_urls: Vec<String> = Vec::new();
+        for (url, _) in &references {
+            if !is_remote_url(url) && seen_local.insert(url.clone()) {
+                local_urls.push(url.clone());
+            }
+        }
+        let resolved = resolve_local_assets(markdown_dir, &local_urls).await?;
 
         // One upload slot per unique resolved file; `url_to_slot` may point
         // several distinct markdown url strings at the same file (the Python
@@ -711,8 +742,8 @@ impl MarkdownImporter {
             if is_remote_url(&url) {
                 continue;
             }
-            let path = match resolve_local_asset(markdown_dir, &url) {
-                Some(path) => path,
+            let path = match resolved.get(&url) {
+                Some(path) => path.clone(),
                 None => {
                     // Emitted once per occurrence, matching the Python
                     // resolver being called for every reference.
@@ -842,7 +873,7 @@ impl MarkdownImporter {
                 url_map.insert(url.clone(), uploaded.clone());
             }
         }
-        url_map
+        Ok(url_map)
     }
 
     /// Mirrors `_read_markdown`: decode as UTF-8 with BOM stripping
@@ -933,12 +964,40 @@ fn expand_tilde(input: &str) -> PathBuf {
     PathBuf::from(input)
 }
 
+/// Test-only probe recording the OS thread that performed the blocking path
+/// work. The regression tests use it to prove `canonicalize`/`is_file` run on
+/// a `spawn_blocking` thread rather than a tokio worker.
+#[cfg(test)]
+mod blocking_probe {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    pub static USER_PATH: AtomicU64 = AtomicU64::new(0);
+    pub static LOCAL_ASSET: AtomicU64 = AtomicU64::new(0);
+
+    /// Hashed `ThreadId` — stable for the life of the process, comparable
+    /// across calls without exposing `ThreadId` itself.
+    pub fn thread_hash() -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        std::thread::current().id().hash(&mut hasher);
+        hasher.finish()
+    }
+
+    pub fn record(slot: &AtomicU64) {
+        slot.store(thread_hash(), Ordering::SeqCst);
+    }
+}
+
 /// `Path(input).expanduser().resolve()` without requiring existence:
 /// canonicalize when possible, else fall back to an absolute (cwd-joined)
 /// path so validation errors still carry a full path. The Windows verbatim
 /// (`\\?\`) prefix from `canonicalize` is stripped so reported paths read
 /// like Python's `str(Path.resolve())`.
-fn resolve_user_path(input: &str) -> PathBuf {
+///
+/// Blocking (canonicalize may hit a slow network filesystem): call it from
+/// [`resolve_user_path`] or another blocking context, never directly from an
+/// async task.
+fn resolve_user_path_blocking(input: &str) -> PathBuf {
     let expanded = expand_tilde(input);
     match fs::canonicalize(&expanded) {
         Ok(p) => strip_verbatim_prefix(p),
@@ -947,6 +1006,19 @@ fn resolve_user_path(input: &str) -> PathBuf {
             .map(|cwd| cwd.join(&expanded))
             .unwrap_or(expanded),
     }
+}
+
+/// Async wrapper around [`resolve_user_path_blocking`] so canonicalizing a
+/// user-supplied (possibly network-mounted) path cannot stall a tokio worker.
+async fn resolve_user_path(input: &str) -> Result<PathBuf> {
+    let owned = input.to_string();
+    tokio::task::spawn_blocking(move || {
+        #[cfg(test)]
+        blocking_probe::record(&blocking_probe::USER_PATH);
+        resolve_user_path_blocking(&owned)
+    })
+    .await
+    .map_err(|join_error| Error::Other(format!("could not resolve path {input:?}: {join_error}")))
 }
 
 fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
@@ -968,9 +1040,46 @@ fn is_remote_url(value: &str) -> bool {
     }
 }
 
+/// Resolve every local image url for one page in a single blocking task, so
+/// `canonicalize` + `is_file` never run on a tokio worker. Urls whose file
+/// cannot be canonicalized are simply absent from the map (the "image not
+/// found" case); an Err here is the blocking task itself failing, which the
+/// caller records on the page rather than misreporting every image missing.
+async fn resolve_local_assets(
+    markdown_dir: &Path,
+    urls: &[String],
+) -> Result<HashMap<String, PathBuf>> {
+    if urls.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let dir = markdown_dir.to_path_buf();
+    let urls = urls.to_vec();
+    tokio::task::spawn_blocking(move || {
+        #[cfg(test)]
+        blocking_probe::record(&blocking_probe::LOCAL_ASSET);
+        let mut resolved = HashMap::with_capacity(urls.len());
+        for url in urls {
+            if let Some(path) = resolve_local_asset_blocking(&dir, &url) {
+                resolved.insert(url, path);
+            }
+        }
+        resolved
+    })
+    .await
+    .map_err(|join_error| {
+        Error::Other(format!(
+            "could not resolve image assets under {}: {join_error}",
+            markdown_dir.display()
+        ))
+    })
+}
+
 /// Mirrors `_resolve_local_asset`: urlsplit + unquote, `\` → `/`, relative to
 /// the markdown directory, resolve, then `is_file`.
-fn resolve_local_asset(markdown_dir: &Path, image_url: &str) -> Option<PathBuf> {
+///
+/// Blocking: only call it from [`resolve_local_assets`] or another blocking
+/// context.
+fn resolve_local_asset_blocking(markdown_dir: &Path, image_url: &str) -> Option<PathBuf> {
     // `urlsplit(image_url).path` for the local (scheme-less or ignored-scheme)
     // cases this importer encounters: strip any query/fragment. For
     // scheme-bearing non-remote URLs the whole string is used as the path —
@@ -1188,6 +1297,7 @@ fn scan_image_references(content: &str) -> Vec<(String, String)> {
 mod tests {
     use super::*;
     use std::ffi::OsStr;
+    use std::sync::atomic::Ordering;
 
     fn unique_temp_dir(label: &str) -> PathBuf {
         let dir =
@@ -1219,6 +1329,38 @@ mod tests {
         let text = expanded.to_string_lossy().replace('\\', "/");
         assert!(text.ends_with("/a.md"), "unexpected: {text}");
         assert!(!text.starts_with('~'));
+    }
+
+    // -- resolve_user_path -------------------------------------------------
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn resolve_user_path_runs_canonicalize_off_the_async_worker() {
+        let dir = unique_temp_dir("resolve-user-path");
+        let file = dir.join("doc.md");
+        fs::write(&file, b"# doc").unwrap();
+
+        let worker_thread = blocking_probe::thread_hash();
+        let resolved = resolve_user_path(file.to_str().unwrap()).await.unwrap();
+        let expected = strip_verbatim_prefix(fs::canonicalize(&file).unwrap());
+        assert_eq!(resolved, expected);
+        assert_ne!(
+            blocking_probe::USER_PATH.load(Ordering::SeqCst),
+            worker_thread,
+            "canonicalize must run on a spawn_blocking thread"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn resolve_user_path_keeps_nonexistent_relative_paths_absolute() {
+        let missing = format!("definitely-missing-{}.md", Uuid::new_v4());
+        let resolved = resolve_user_path(&missing).await.unwrap();
+        assert!(resolved.is_absolute(), "got {}", resolved.display());
+        assert_eq!(
+            resolved.file_name().and_then(|n| n.to_str()),
+            Some(missing.as_str())
+        );
     }
 
     // -- is_remote_url -----------------------------------------------------
@@ -1255,15 +1397,35 @@ mod tests {
         let img = dir.join("assets").join("a b.png");
         fs::write(&img, b"png").unwrap();
 
-        let found = resolve_local_asset(&dir, "assets/a%20b.png").expect("must resolve");
+        let found = resolve_local_asset_blocking(&dir, "assets/a%20b.png").expect("must resolve");
         assert!(found.is_file());
 
         // Query/fragment are stripped like urlsplit does.
-        let found = resolve_local_asset(&dir, "assets/a%20b.png?v=2#frag").expect("must resolve");
+        let found =
+            resolve_local_asset_blocking(&dir, "assets/a%20b.png?v=2#frag").expect("must resolve");
         assert!(found.is_file());
 
-        assert!(resolve_local_asset(&dir, "assets/missing.png").is_none());
-        assert!(resolve_local_asset(&dir, "").is_none());
+        assert!(resolve_local_asset_blocking(&dir, "assets/missing.png").is_none());
+        assert!(resolve_local_asset_blocking(&dir, "").is_none());
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn resolve_local_assets_runs_canonicalize_off_the_async_worker() {
+        let dir = unique_temp_dir("resolve-off-worker");
+        fs::write(dir.join("a.png"), b"png").unwrap();
+
+        let worker_thread = blocking_probe::thread_hash();
+        let urls = ["a.png".to_string(), "missing.png".to_string()];
+        let resolved = resolve_local_assets(&dir, &urls).await.unwrap();
+        assert!(resolved.get("a.png").expect("resolved").is_file());
+        assert!(!resolved.contains_key("missing.png"));
+        assert_ne!(
+            blocking_probe::LOCAL_ASSET.load(Ordering::SeqCst),
+            worker_thread,
+            "canonicalize/is_file must run on a spawn_blocking thread"
+        );
 
         fs::remove_dir_all(&dir).ok();
     }

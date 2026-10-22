@@ -205,7 +205,10 @@ async fn http_workspace_zip_export_without_task_id_reports_response() {
     let message = body["error"]["message"]
         .as_str()
         .unwrap_or_else(|| panic!("expected a protocol error, got: {body}"));
-    assert!(message.contains("unexpected envelope"), "message: {message}");
+    assert!(
+        message.contains("unexpected envelope"),
+        "message: {message}"
+    );
     assert!(!message.contains("{data}"), "message: {message}");
     mock.assert_calls_async(1).await;
 }
