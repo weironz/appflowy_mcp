@@ -321,15 +321,16 @@ pub(crate) fn parse_iso_timestamp(s: &str) -> Option<i64> {
     let (mut hour, mut minute, mut second, mut offset_secs) = (0i64, 0i64, 0i64, 0i64);
     if let Some(time_part) = time_part {
         let time_part = time_part.trim();
-        // "2026-10-01T" leaves the time part empty and `time_part[1..]` would
-        // panic there (slice out of bounds). Skip the offset search so the
-        // hms parse below rejects the input; a 1-char part is fine, as [1..]
-        // of it is just "".
-        let offset_idx = if time_part.is_empty() {
-            None
-        } else {
-            time_part[1..].find(['+', '-']).map(|idx| idx + 1)
-        };
+        // Locate a `±HH:MM` offset past the first character. Byte slicing
+        // (`time_part[1..]`) panics when the part is empty or starts with a
+        // multi-byte UTF-8 char (e.g. full-width `１`); char_indices is
+        // boundary-safe and yields None for both, letting the hms parse
+        // below reject the input.
+        let offset_idx = time_part
+            .char_indices()
+            .skip(1)
+            .find(|(_, ch)| *ch == '+' || *ch == '-')
+            .map(|(idx, _)| idx);
         let (hms, offset) = if let Some(zone) = time_part.strip_suffix('Z') {
             (zone, 0i64)
         } else if let Some(idx) = offset_idx {
@@ -1178,6 +1179,19 @@ mod tests {
         // The trailing-space variant trims to the same input.
         assert_eq!(parse_iso_timestamp("2026-10-01T"), None);
         assert_eq!(parse_iso_timestamp("2026-10-01T "), None);
+        // A multi-byte first time character (full-width `１`, common with
+        // CJK input methods) used to panic in the same search: byte 1 is
+        // not a char boundary inside `１`. It must fail the hms parse
+        // instead, with or without an offset tail. The full-width-space
+        // variant trims to the empty case above.
+        assert_eq!(parse_iso_timestamp("2026-10-01T１2:00"), None);
+        assert_eq!(parse_iso_timestamp("2026-10-01T１2:00+05:00"), None);
+        assert_eq!(parse_iso_timestamp("2026-10-01T　"), None);
+        // A negative offset exercises the same search's sign branch.
+        assert_eq!(
+            parse_iso_timestamp("2026-10-01T02:30-05:00"),
+            Some(1_790_839_800)
+        );
     }
 
     #[test]
